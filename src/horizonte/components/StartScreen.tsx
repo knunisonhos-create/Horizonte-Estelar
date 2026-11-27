@@ -77,9 +77,14 @@ export const StartScreen: React.FC<StartScreenProps> = ({
       <div className="w-full h-full px-4 sm:px-6 py-3 lg:h-[100dvh] flex flex-col gap-3">
         {/* Top Bar */}
         <header className="shrink-0 flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/90 pb-2.5">
-          <h1 className="font-display text-2xl xl:text-3xl font-bold text-white tracking-tight whitespace-nowrap shrink-0">
-            Horizonte Estelar
-          </h1>
+          <div className="flex items-center gap-3 shrink-0">
+            <h1 className="font-display text-2xl xl:text-3xl font-bold text-white tracking-tight whitespace-nowrap">
+              Horizonte Estelar
+            </h1>
+            <span className="text-xs font-mono text-cyan-400 bg-cyan-950/60 border border-cyan-800/60 px-2 py-0.5 rounded">
+              v2.0.0
+            </span>
+          </div>
 
           <div className="flex flex-wrap items-center gap-3 ml-auto">
             <div className="flex items-center gap-2.5">
