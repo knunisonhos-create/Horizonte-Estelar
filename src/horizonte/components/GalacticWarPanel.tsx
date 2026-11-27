@@ -19,10 +19,11 @@ import {
   Trophy,
   X,
 } from 'lucide-react';
-import type { PlayerCampaignState } from '../types/game';
+import type { PlayerCampaignState, Rank3WarAbilityChoice } from '../types/game';
 import { FACTIONS_BY_ID } from '../data/lifeforms';
 import { HULLS_BY_ID, RESOURCES_BY_ID } from '../data/items';
 import { KNOWN_GALAXY_SYSTEMS } from '../data/universe';
+import { computeShipTechLevel, computeSquadronBonus } from '../engine/combat';
 import {
   factionMilitaryPower,
   GALACTIC_CYCLE_DURATION_SEC,
@@ -34,6 +35,7 @@ import {
   FACTION_RANKS,
   getAvailableFactionRivals,
   getPlayerFactionRank,
+  getRank3CollectibleResources,
   getWildSystemsNearFaction,
   normalizeFactionCommand,
 } from '../engine/factionRanks';
@@ -46,6 +48,9 @@ interface GalacticWarPanelProps {
   onClaimSupremeCaptain?: () => void;
   onDonateWarEffort?: (resourceId: string, qty: number) => void;
   onDispatchPatrol?: (shipUid: string, targetSystemId: string) => void;
+  onChooseRank3Mode?: (mode: Rank3WarAbilityChoice) => void;
+  onToggleSquadronShip?: (shipUid: string) => void;
+  onConfigureResourceCollection?: (shipUids: string[], resourceId: string) => void;
   onOrderOffensive?: (warId: string) => void;
   onExecutiveDiplomacy?: (action: 'ceasefire' | 'declare_war', targetFactionId: string) => void;
   onSetSupremeColonize?: (systemId: string | null) => void;
@@ -64,6 +69,9 @@ export const GalacticWarPanel: React.FC<GalacticWarPanelProps> = ({
   onClaimSupremeCaptain,
   onDonateWarEffort,
   onDispatchPatrol,
+  onChooseRank3Mode,
+  onToggleSquadronShip,
+  onConfigureResourceCollection,
   onOrderOffensive,
   onExecutiveDiplomacy,
   onSetSupremeColonize,
@@ -84,6 +92,8 @@ export const GalacticWarPanel: React.FC<GalacticWarPanelProps> = ({
   const factionCmd = useMemo(() => normalizeFactionCommand(campaign.factionCommand), [campaign.factionCommand]);
   const wildCandidates = useMemo(() => getWildSystemsNearFaction(campaign), [campaign]);
   const rivalFactions = useMemo(() => getAvailableFactionRivals(campaign), [campaign]);
+  const squadronStatus = useMemo(() => computeSquadronBonus(campaign), [campaign]);
+  const collectibleResources = useMemo(() => getRank3CollectibleResources(campaign), [campaign]);
 
   const reserveShips = useMemo(
     () => campaign.ships.filter((s) => s.uid !== campaign.activeShipUid),
@@ -97,8 +107,18 @@ export const GalacticWarPanel: React.FC<GalacticWarPanelProps> = ({
   const [donateResourceId, setDonateResourceId] = useState<string>('');
   const [patrolShipUid, setPatrolShipUid] = useState<string>('');
   const [patrolSystemId, setPatrolSystemId] = useState<string>('');
+  const [collectResourceId, setCollectResourceId] = useState<string>('');
   const [offensiveWarId, setOffensiveWarId] = useState<string>('');
   const [diploTargetFactionId, setDiploTargetFactionId] = useState<string>('');
+
+  useEffect(() => {
+    const savedRes = factionCmd.resourceCollection?.resourceId;
+    if (savedRes && collectibleResources.some((r) => r.resource.id === savedRes)) {
+      setCollectResourceId(savedRes);
+    } else if (!collectResourceId || !collectibleResources.some((r) => r.resource.id === collectResourceId)) {
+      setCollectResourceId(collectibleResources[0]?.resource.id ?? '');
+    }
+  }, [factionCmd.resourceCollection?.resourceId, collectibleResources, collectResourceId]);
 
   useEffect(() => {
     if (!donateResourceId || !campaign.cargo.some((c) => c.resourceId === donateResourceId)) {
@@ -396,7 +416,8 @@ export const GalacticWarPanel: React.FC<GalacticWarPanelProps> = ({
                       Ascensão a Capitão Supremo (Patente 7)
                     </div>
                     <div className="text-slate-300">
-                      Requer <strong>650+ Renome</strong> ({rankInfo.renown}/650) e{' '}
+                      Requer <strong>{FACTION_RANKS[7].minRenown}+ Renome</strong> ({rankInfo.renown}/
+                      {FACTION_RANKS[7].minRenown}) e{' '}
                       <strong>1 colônia fundada</strong> ({rankInfo.coloniesFounded}/1) ou{' '}
                       <strong>3 missões da facção concluídas</strong> ({rankInfo.missionsCompleted}/3).
                     </div>
@@ -472,67 +493,227 @@ export const GalacticWarPanel: React.FC<GalacticWarPanelProps> = ({
               )}
             </div>
 
-            {/* Patente 3: Despacho de Frota Secundária */}
-            <div className="bg-slate-950/85 border border-slate-800 rounded-xl p-3 space-y-2">
+            {/* Patente 3: Escolha Estratégica (Esquadrão de Combate ou Coleta de Recursos) */}
+            <div className="bg-slate-950/85 border border-slate-800 rounded-xl p-3 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <div className="font-semibold text-white flex items-center gap-1.5">
                   <Rocket className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Despacho de Frota Secundária (Patente 3+)</span>
+                  <span>Habilidade de Guerra — Patente 3 (Capitão de Esquadrão)</span>
                 </div>
                 <span className="text-[10px] font-mono-tabular text-slate-400">
                   {rankInfo.current.rank >= 3 ? 'Desbloqueado' : 'Requer 100 Renome'}
                 </span>
               </div>
+
+              {factionCmd.activePatrol && (
+                <div className="bg-sky-950/50 border border-sky-500/45 rounded-lg px-3 py-2 text-[11px] text-sky-200">
+                  <strong>{factionCmd.activePatrol.shipName}</strong> está concluindo patrulha em{' '}
+                  <strong>{factionCmd.activePatrol.targetSystemName}</strong> neste ciclo.
+                </div>
+              )}
+
               {rankInfo.current.rank < 3 ? (
                 <div className="text-[11px] text-slate-400">
-                  Na Patente 3 (Capitão de Esquadrão), envie naves reservas em patrulha automática por 1 ciclo.
-                </div>
-              ) : factionCmd.activePatrol ? (
-                <div className="bg-sky-950/50 border border-sky-500/45 rounded-lg px-3 py-2 text-[11px] text-sky-200">
-                  <strong>{factionCmd.activePatrol.shipName}</strong> está em patrulha em{' '}
-                  <strong>{factionCmd.activePatrol.targetSystemName}</strong>. Retornará com saques no próximo Ciclo Galáctico.
-                </div>
-              ) : reserveShips.length === 0 ? (
-                <div className="text-[11px] text-slate-400 italic">
-                  Você precisa ter pelo menos uma nave reserva no hangar para despachar patrulhas.
+                  Na Patente 3 (100 Renome), escolha entre formar um <strong>Esquadrão de até 3 naves</strong> seguindo você (+1% × nível por nave) ou enviar até 3 naves em <strong>Coleta Estratégica</strong> de recursos raros/épicos/lendários nos sistemas da facção.
                 </div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2 items-center">
-                  <select
-                    value={patrolShipUid}
-                    onChange={(e) => setPatrolShipUid(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-100 text-[11px]"
-                  >
-                    {reserveShips.map((s) => (
-                      <option key={s.uid} value={s.uid}>
-                        {s.customName} ({HULLS_BY_ID[s.hullId]?.name ?? s.hullId})
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={patrolSystemId}
-                    onChange={(e) => setPatrolSystemId(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-100 text-[11px]"
-                  >
-                    {patrolTargetOptions.map((sys) => {
-                      const own = sys.controllingFactionId
-                        ? FACTIONS_BY_ID[sys.controllingFactionId]?.name ?? 'Facção'
-                        : 'Selvagem';
-                      return (
-                        <option key={sys.id} value={sys.id}>
-                          {sys.name} ({own})
-                        </option>
+                <div className="space-y-2.5">
+                  {/* Mode Choice Buttons */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onChooseRank3Mode?.('esquadrao')}
+                      className={`p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                        factionCmd.rank3Choice === 'esquadrao'
+                          ? 'bg-sky-500/20 border-sky-400 text-white'
+                          : 'bg-slate-900/80 border-slate-800 hover:border-slate-700 text-slate-300'
+                      }`}
+                    >
+                      <div className="font-semibold text-xs flex items-center justify-between gap-1">
+                        <span>1. Formar Esquadrão</span>
+                        {factionCmd.rank3Choice === 'esquadrao' && (
+                          <span className="text-[10px] text-sky-300 font-mono-tabular">ATIVO</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
+                        Até 3 naves acompanham você por toda a galáxia, disparam em combate e dão +1% × nível em Ataque e Escudo.
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onChooseRank3Mode?.('coleta')}
+                      className={`p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                        factionCmd.rank3Choice === 'coleta'
+                          ? 'bg-amber-500/20 border-amber-400 text-white'
+                          : 'bg-slate-900/80 border-slate-800 hover:border-slate-700 text-slate-300'
+                      }`}
+                    >
+                      <div className="font-semibold text-xs flex items-center justify-between gap-1">
+                        <span>2. Coleta Estratégica</span>
+                        {factionCmd.rank3Choice === 'coleta' && (
+                          <span className="text-[10px] text-amber-300 font-mono-tabular">ATIVO</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
+                        Escolha 1 recurso raro/épico/lendário e envie 1 a 3 naves: rendimento/ciclo = planetas ÷ (3 / 2 / 1).
+                      </div>
+                    </button>
+                  </div>
+
+                  {reserveShips.length === 0 ? (
+                    <div className="text-[11px] text-slate-400 italic bg-slate-900/60 border border-slate-800 rounded-lg p-2.5">
+                      Compre ou fabrique pelo menos uma nave reserva no Estaleiro para vincular ao Esquadrão ou à Coleta Estratégica.
+                    </div>
+                  ) : factionCmd.rank3Choice === 'coleta' ? (
+                    (() => {
+                      const activeResId =
+                        collectResourceId ||
+                        factionCmd.resourceCollection?.resourceId ||
+                        collectibleResources[0]?.resource.id ||
+                        '';
+                      const selectedResInfo = collectibleResources.find((r) => r.resource.id === activeResId);
+                      const planetCount = selectedResInfo?.planetCount ?? 0;
+                      const linkedUids = (factionCmd.resourceCollection?.shipUids ?? []).filter((id) =>
+                        reserveShips.some((s) => s.uid === id)
                       );
-                    })}
-                  </select>
-                  <button
-                    type="button"
-                    disabled={!onDispatchPatrol || !patrolShipUid || !patrolSystemId}
-                    onClick={() => onDispatchPatrol?.(patrolShipUid, patrolSystemId)}
-                    className="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-[11px] cursor-pointer"
-                  >
-                    Despachar
-                  </button>
+                      const count = linkedUids.length;
+                      const divisor = count >= 3 ? 1 : count === 2 ? 2 : 3;
+                      const cycleYield = count > 0 ? Math.floor(planetCount / divisor) : 0;
+
+                      return (
+                        <div className="bg-slate-900/75 border border-amber-500/35 rounded-xl p-2.5 space-y-2">
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-semibold text-amber-200 block">
+                              Recurso-alvo da Facção (Raro / Épico / Lendário)
+                            </label>
+                            <select
+                              value={activeResId}
+                              onChange={(e) => {
+                                const nextRes = e.target.value;
+                                setCollectResourceId(nextRes);
+                                onConfigureResourceCollection?.(linkedUids, nextRes);
+                              }}
+                              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100 text-[11px]"
+                            >
+                              {collectibleResources.map(({ resource, planetCount: pCount }) => (
+                                <option key={resource.id} value={resource.id}>
+                                  {resource.name} ({resource.rarity}) — {pCount} planeta{pCount === 1 ? '' : 's'} na facção
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="bg-slate-950/80 border border-slate-800 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]">
+                            <span className="text-slate-300">
+                              Planetas: <strong className="text-white">{planetCount}</strong> · Naves:{' '}
+                              <strong className="text-amber-300">{count}/3</strong> (÷{divisor})
+                            </span>
+                            <span className="font-mono-tabular font-bold text-emerald-300">
+                              +{cycleYield} {selectedResInfo?.resource.name ?? ''}/ciclo
+                            </span>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] text-slate-300 font-semibold">
+                              Vincular Naves Reservas à Coleta ({count}/3)
+                            </div>
+                            {reserveShips.map((s) => {
+                              const isSelected = linkedUids.includes(s.uid);
+                              const onLegacyPatrol = factionCmd.activePatrol?.shipUid === s.uid;
+                              const sLv = computeShipTechLevel(s);
+                              return (
+                                <div
+                                  key={s.uid}
+                                  className="flex items-center justify-between gap-2 bg-slate-950/70 border border-slate-800 rounded-lg px-2.5 py-1.5"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="font-medium text-white truncate">
+                                      {s.customName}{' '}
+                                      <span className="text-[10px] text-cyan-300 font-mono-tabular">Nível {sLv}</span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 truncate">
+                                      {HULLS_BY_ID[s.hullId]?.name ?? s.hullId}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={onLegacyPatrol || (!isSelected && count >= 3)}
+                                    onClick={() => {
+                                      const nextUids = isSelected
+                                        ? linkedUids.filter((id) => id !== s.uid)
+                                        : [...linkedUids, s.uid];
+                                      onConfigureResourceCollection?.(nextUids, activeResId);
+                                    }}
+                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 cursor-pointer disabled:opacity-40 ${
+                                      isSelected
+                                        ? 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+                                        : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
+                                    }`}
+                                  >
+                                    {onLegacyPatrol ? 'Em Patrulha' : isSelected ? 'Coletando ✓' : 'Enviar'}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()
+                  ) : factionCmd.rank3Choice === 'esquadrao' ? (
+                    <div className="bg-slate-900/75 border border-sky-500/35 rounded-xl p-2.5 space-y-2">
+                      <div className="bg-slate-950/80 border border-slate-800 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-slate-300">
+                          Esquadrão Ativo:{' '}
+                          <strong className="text-sky-300">{squadronStatus.ships.length}/3 naves</strong>
+                        </span>
+                        <span className="font-mono-tabular font-bold text-emerald-300">
+                          +{squadronStatus.bonusPct}% Ataque e Escudo
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {reserveShips.map((s) => {
+                          const linked = (factionCmd.squadronShipUids ?? []).includes(s.uid);
+                          const onLegacyPatrol = factionCmd.activePatrol?.shipUid === s.uid;
+                          const sLv = computeShipTechLevel(s);
+                          return (
+                            <div
+                              key={s.uid}
+                              className="flex items-center justify-between gap-2 bg-slate-950/70 border border-slate-800 rounded-lg px-2.5 py-1.5"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-medium text-white truncate">
+                                  {s.customName}{' '}
+                                  <span className="text-[10px] text-sky-300 font-mono-tabular">
+                                    Nível {sLv} (+{sLv}%)
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-400 truncate">
+                                  {HULLS_BY_ID[s.hullId]?.name ?? s.hullId}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={onLegacyPatrol || (!linked && squadronStatus.ships.length >= 3)}
+                                onClick={() => onToggleSquadronShip?.(s.uid)}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 cursor-pointer disabled:opacity-40 ${
+                                  linked
+                                    ? 'bg-sky-400 hover:bg-sky-300 text-slate-950'
+                                    : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
+                                }`}
+                              >
+                                {onLegacyPatrol ? 'Em Patrulha' : linked ? 'Vinculada ✓' : 'Vincular'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-slate-400 italic bg-slate-900/60 border border-slate-800 rounded-lg p-2.5">
+                      Escolha acima entre <strong>Formar Esquadrão</strong> ou <strong>Coleta Estratégica</strong> para vincular suas naves reservas.
+                    </div>
+                  )}
                 </div>
               )}
             </div>

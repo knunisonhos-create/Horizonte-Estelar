@@ -1322,9 +1322,9 @@ function ItemCodex({
       rarity: i.rarity,
       description: i.description,
       price: i.price,
-      extra: `${EXTRACTION_CLASS_LABELS[i.extractionClass]} · ${i.ratePerSec.toFixed(1)} un./s`,
+      extra: `${i.extractorScope === 'nave' ? 'Extração de Nave (máx. 2)' : 'Extração Manual (Tripulação)'} · ${EXTRACTION_CLASS_LABELS[i.extractionClass]} · ${i.ratePerSec.toFixed(1)} un./s`,
       itemCategory: 'extractor' as const,
-      typeLabel: 'Extrator',
+      typeLabel: i.extractorScope === 'nave' ? 'Extrator de Nave' : 'Extrator Manual',
       techCategory: i.factionStyle,
     })),
     ...UTILITY_MODULES.map((i) => ({
@@ -1344,9 +1344,9 @@ function ItemCodex({
       rarity: i.rarity,
       description: i.description,
       price: i.price,
-      extra: `Exploração +${i.explorationBonus} · Combate solo +${i.combatPower}`,
+      extra: `Tripulação · Exploração +${i.explorationBonus} · Combate solo +${i.combatPower}`,
       itemCategory: 'suit' as const,
-      typeLabel: 'Traje',
+      typeLabel: 'Equip. Tripulação',
       techCategory: i.factionStyle,
     })),
     ...CONSUMABLES.map((i) => ({

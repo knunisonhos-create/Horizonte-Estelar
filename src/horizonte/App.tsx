@@ -17,6 +17,7 @@ import type {
   ActiveEnemy,
   ActiveNarrativeEventSession,
   CharacterAttributeId,
+  CharacterGender,
   CrewMember,
   EncounterGearCategory,
   EncounterState,
@@ -64,26 +65,53 @@ import { DEFAULT_ORIGIN_BONUSES, mergeOriginBonuses, SPECIAL_ABILITIES_BY_ID } f
 import { PLANET_TYPES_BY_CODE } from './data/planets';
 import { generateSolarSystem, getSystemsInRadius, getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from './data/universe';
 import {
+  buildEnemyWave,
   compartmentUsed,
   computeCrewBonuses,
   computeCrewHarmony,
+  computeCrewSupplyDrainPerSec,
+  computeEnemyOrbitDetectionChancePct,
   computeFleeSuccessChance,
   computeShipDerivedStats,
+  computeShipTechLevel,
+  computeSquadronBonus,
   crewHealthRatio,
   estimateEncounterWinChance,
+  getCrewItemMaintenancePerCycle,
+  getCrewManualExtractorIds,
+  getCrewSuitIds,
   getEffectiveExtractorRate,
   getEffectiveRoleSkill,
   getSuitGearEffectiveStats,
+  isCrewEquipableItem,
   TECH_SYNERGY_BONUS,
 } from './engine/combat';
-import { planetResourceRemainingStock, quoteSale, resourceSupplyBand } from './engine/market';
-import { buildCommercialTrade, markDefeatedHuntMissions, planRandomEncounter } from './engine/encounters';
+import {
+  blueprintStockKey,
+  consumableStockKey,
+  equipmentStockKey,
+  hullStockKey,
+  planetBlueprintRemainingStock,
+  planetConsumableRemainingStock,
+  planetEquipmentRemainingStock,
+  planetHullRemainingStock,
+  planetResourceRemainingStock,
+  quoteSale,
+  resourceSupplyBand,
+} from './engine/market';
+import {
+  buildCommercialTrade,
+  isAtWarWithPlayer,
+  markDefeatedHuntMissions,
+  planRandomEncounter,
+} from './engine/encounters';
 import {
   detachInstalledGear,
   equipVaultGear,
   installGearOnShip,
   normalizeFactionVault,
   sendConsumableToVault,
+  sendCrewGearToVault,
   sendDepotGearToVault,
   sendInstalledGearToVault,
   sendResourceToVault,
@@ -102,7 +130,9 @@ import {
 } from './engine/galacticWar';
 import {
   advanceGalacticCycleWithCommand,
+  chooseRank3WarMode,
   claimSupremeCaptaincy,
+  configureResourceCollection,
   dispatchReserveShipPatrol,
   donateResourceToWarEffort,
   executeExecutiveDiplomacy,
@@ -110,6 +140,7 @@ import {
   getPlayerFactionRank,
   normalizeFactionCommand,
   orderCoordinatedOffensive,
+  toggleSquadronShip,
 } from './engine/factionRanks';
 import {
   COLONY_COST,
@@ -269,43 +300,6 @@ function storeInCompartment(
   };
 }
 
-function buildEnemyWave(
-  factionId: string,
-  count: number,
-  techLevel: number,
-  playerPos: { x: number; z: number },
-  namePrefix = 'Interceptador'
-): ActiveEnemy[] {
-  const dmgTypes: WeaponDamageType[] = ['laser', 'cinetica', 'plasma', 'missil'];
-  const clampedTech = Math.max(1, Math.min(5, Math.round(techLevel)));
-  const baseHull = (36 + clampedTech * 24) * 3;
-  const baseShield = (12 + clampedTech * 22) * 3;
-  const baseDps = 5 + clampedTech * 4.5;
-  const baseScore = 45 + clampedTech * 38;
-
-  return Array.from({ length: count }, (_, i) => {
-    const a = (i / Math.max(1, count)) * Math.PI * 2 + Math.random() * 0.6;
-    const dist = 24 + i * 5;
-    return {
-      id: `en_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
-      name: `${namePrefix} ${i + 1}`,
-      factionId,
-      techLevel: clampedTech,
-      hull: baseHull,
-      maxHull: baseHull,
-      shield: baseShield,
-      maxShield: baseShield,
-      dps: baseDps,
-      damageType: dmgTypes[(clampedTech + i) % dmgTypes.length],
-      combatScore: baseScore,
-      x: playerPos.x + Math.cos(a) * dist,
-      z: playerPos.z + Math.sin(a) * dist,
-      angle: a,
-      orbitDir: i % 2 === 0 ? 1 : -1,
-    };
-  });
-}
-
 export default function App() {
   const existingSave = useMemo(() => loadSavedCampaign(), []);
   const [campaign, setCampaign] = useState<PlayerCampaignState | null>(null);
@@ -354,7 +348,26 @@ export default function App() {
   fleeRef.current = fleeState;
   const [pendingEncounter, setPendingEncounter] = useState<EncounterState | null>(null);
   const [hostileCountdown, setHostileCountdown] = useState<number | null>(null);
-  const [hostileWaveCooldown, setHostileWaveCooldown] = useState<number>(0);
+  const [planetDefenseCooldowns, setPlanetDefenseCooldowns] = useState<Record<string, number>>({});
+  const planetDefenseCooldownsRef = useRef<Record<string, number>>({});
+  planetDefenseCooldownsRef.current = planetDefenseCooldowns;
+  const setPlanetDefenseTimer = useCallback((planetId: string, seconds = 60) => {
+    setPlanetDefenseCooldowns((prev) => {
+      const next = { ...prev, [planetId]: seconds };
+      planetDefenseCooldownsRef.current = next;
+      return next;
+    });
+  }, []);
+  const clearAllPlanetDefenseTimers = useCallback(() => {
+    planetDefenseCooldownsRef.current = {};
+    setPlanetDefenseCooldowns({});
+  }, []);
+  const [bombardWeaponCooldownSec, setBombardWeaponCooldownSec] = useState(0);
+  const bombardWeaponCooldownRef = useRef(0);
+  bombardWeaponCooldownRef.current = bombardWeaponCooldownSec;
+  const [damageItemCooldownSec, setDamageItemCooldownSec] = useState(0);
+  const damageItemCooldownRef = useRef(0);
+  damageItemCooldownRef.current = damageItemCooldownSec;
   const [depletedDeposits, setDepletedDeposits] = useState<Record<string, number>>({});
   const depletedDepositsRef = useRef(depletedDeposits);
   depletedDepositsRef.current = depletedDeposits;
@@ -362,6 +375,14 @@ export default function App() {
   const [activeNarrativeEvent, setActiveNarrativeEvent] = useState<ActiveNarrativeEventSession | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [landingPulse, setLandingPulse] = useState<{ planetId: string; nonce: number } | null>(null);
+  const [bombardPulse, setBombardPulse] = useState<{ planetId: string; nonce: number } | null>(null);
+  const [combatBlastPulse, setCombatBlastPulse] = useState<{
+    nonce: number;
+    damageAll: number;
+    stripShieldPct: number;
+    label?: string;
+  } | null>(null);
+  const combatBlastNonceRef = useRef(0);
   const [activePlanetTab, setActivePlanetTab] = useState<string>('depositos');
   const [planetsHudOpen, setPlanetsHudOpen] = useState(true);
   const [missionsHudOpen, setMissionsHudOpen] = useState(true);
@@ -373,8 +394,41 @@ export default function App() {
     };
   }, []);
 
+  const activeEventPanelOpen = Boolean(
+    activeNarrativeEvent ||
+      pendingEncounter ||
+      (vnNodes && vnNodes[vnIndex] && !vnNodes[vnIndex].isOpening)
+  );
+  const inCombatActive = activeEnemies.length > 0;
+  const orbitingPlanetId = campaign?.orbitingPlanetId ?? null;
+  const hasActiveCampaign = Boolean(campaign);
+
+  useEffect(() => {
+    if (!hasActiveCampaign) {
+      soundEngine.setMusicMode('none');
+      return;
+    }
+    if (activeEventPanelOpen) {
+      soundEngine.setMusicMode('event');
+    } else if (inCombatActive) {
+      soundEngine.setMusicMode('combat');
+    } else if (orbitingPlanetId) {
+      soundEngine.setMusicMode('orbit');
+    } else {
+      soundEngine.setMusicMode('space');
+    }
+  }, [hasActiveCampaign, activeEventPanelOpen, inCombatActive, orbitingPlanetId]);
+
+  useEffect(() => {
+    soundEngine.setMusicDucked(narratedTutorialActive);
+  }, [narratedTutorialActive]);
+
   const triggerLandingPulse = useCallback((planetId: string) => {
     setLandingPulse((prev) => ({ planetId, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+
+  const triggerBombardPulse = useCallback((planetId: string) => {
+    setBombardPulse((prev) => ({ planetId, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 
   useEffect(() => {
@@ -468,6 +522,19 @@ export default function App() {
     if (!activeShip || !bonuses) return null;
     return computeShipDerivedStats(activeShip, bonuses);
   }, [activeShip, bonuses]);
+
+  const squadronShips = useMemo(() => {
+    if (!campaign) return [];
+    return computeSquadronBonus(campaign).ships.map(({ ship, techLevel }) => ({
+      uid: ship.uid,
+      hullId: ship.hullId,
+      factionId: ship.factionId,
+      color: ship.color,
+      weaponId: ship.weaponId,
+      techLevel,
+      customName: ship.customName,
+    }));
+  }, [campaign]);
 
   const combatMissionTarget = useMemo(() => {
     if (!campaign || !currentSystem) return null;
@@ -617,7 +684,7 @@ export default function App() {
   pendingEncounterRef.current = pendingEncounter;
   const vnNodesRef = useRef(vnNodes);
   vnNodesRef.current = vnNodes;
-  const inSystemEncounterTimerRef = useRef(36);
+  const inSystemEncounterTimerRef = useRef(12);
   const shipMovingInSpaceRef = useRef(false);
   const pendingSurfaceEventPlanetRef = useRef<{
     planet: PlanetData;
@@ -821,9 +888,10 @@ export default function App() {
       if (sysSummary.isBlackHole) return;
       const ship = curCampaign.ships.find((s) => s.uid === curCampaign.activeShipUid) ?? curCampaign.ships[0];
       const bon = computeCrewBonuses(curCampaign);
+      const shipDerived = computeShipDerivedStats(ship, bon);
       const effectiveSys = getEffectiveSystemSummary(sysSummary, curCampaign);
       const ownerId = effectiveSys.controllingFactionId;
-      const plan = planRandomEncounter(curCampaign, effectiveSys.id, ownerId);
+      const plan = planRandomEncounter(curCampaign, effectiveSys.id, ownerId, Math.random, shipDerived.cloakReduction);
       const attackerFacId = plan.factionId;
       const isWarEncounter = plan.kind === 'guerra';
       const forced = plan.kind === 'guerra' || plan.kind === 'inimigos' || plan.kind === 'cacada';
@@ -849,7 +917,9 @@ export default function App() {
               : plan.kind === 'diplomatico'
                 ? 'Nave Diplomática'
                 : 'Cargueiro';
-      const enemies = buildEnemyWave(attackerFacId, enemyCount, techInfo.techLevel, pos, namePrefix).map((enemy, index) => {
+      const enemies = buildEnemyWave(attackerFacId, enemyCount, techInfo.techLevel, pos, namePrefix, {
+        isElite: plan.kind === 'cacada' || (plan.kind === 'guerra' && effectiveSys.conflictLevel >= 4),
+      }).map((enemy, index) => {
         if (plan.kind !== 'cacada' || !plan.huntMission) return enemy;
         return {
           ...enemy,
@@ -863,9 +933,16 @@ export default function App() {
       const allRes = Object.values(RESOURCES_BY_ID);
       const seedMix = effectiveSys.seed + Math.floor(curCampaign.gameTimeSeconds);
       const diplomaticRes = allRes[Math.abs(seedMix) % allRes.length];
+      const deliveryPlanet =
+        fullSys.planets.find((p) => getPlanetCurrentLevel(p, curCampaign) !== -1) ?? fullSys.planets[0];
+
+      const shouldIncludeMission =
+        (plan.kind === 'diplomatico' || (plan.kind === 'comercial' && Math.random() < 0.45)) &&
+        Boolean(deliveryPlanet) &&
+        Boolean(diplomaticRes);
 
       const missionOffer: Mission | undefined =
-        plan.kind === 'diplomatico' && fullSys.planets.length > 0 && diplomaticRes
+        shouldIncludeMission && deliveryPlanet && diplomaticRes
           ? {
               id: `enc_mis_${Date.now()}`,
               title: `Contrato: ${diplomaticRes.name}`,
@@ -874,8 +951,8 @@ export default function App() {
               targetSystemId: effectiveSys.id,
               targetSystemName: effectiveSys.name,
               targetSystemCoord: { x: effectiveSys.x, y: effectiveSys.y, z: effectiveSys.z },
-              targetPlanetId: fullSys.planets[0].id,
-              targetPlanetName: fullSys.planets[0].name,
+              targetPlanetId: deliveryPlanet.id,
+              targetPlanetName: deliveryPlanet.name,
               requiredResourceId: diplomaticRes.id,
               requiredResourceName: diplomaticRes.name,
               requiredQty: 4,
@@ -883,9 +960,12 @@ export default function App() {
               rewardRenown: 14,
               isRivalTerritory: false,
               status: 'disponivel',
-              description: `Entregar 4 unidades de ${diplomaticRes.name} em órbita de ${fullSys.planets[0].name}.`,
+              description: `Entregar 4 unidades de ${diplomaticRes.name} em órbita de ${deliveryPlanet.name}.`,
             }
           : undefined;
+
+      const shouldIncludeTrade =
+        plan.kind === 'comercial' || (plan.kind === 'diplomatico' && Math.random() < 0.35);
 
       const encounterTitle =
         plan.kind === 'comercial'
@@ -900,6 +980,7 @@ export default function App() {
 
       soundEngine.playAlert();
       shipMovingInSpaceRef.current = false;
+      setShowGalacticMap(false);
       setTravelTargetPlanetId(null);
       setTravelTargetPhenomenonId(null);
       setPendingEncounter({
@@ -914,10 +995,9 @@ export default function App() {
         forcedCombat: forced,
         winChancePct: est.winChancePct,
         tacticalRating: est.tacticalRating,
-        tradeOffer:
-          plan.kind === 'comercial'
-            ? buildCommercialTrade(curCampaign, ship, fullSys.planets, attackerFacId, bon.tradePriceBonus, seedMix)
-            : undefined,
+        tradeOffer: shouldIncludeTrade
+          ? buildCommercialTrade(curCampaign, ship, fullSys.planets, attackerFacId, bon.tradePriceBonus, seedMix)
+          : undefined,
         missionOffer,
       });
     },
@@ -925,13 +1005,25 @@ export default function App() {
   );
 
   // Start / Continue handlers (enter fullscreen + landscape lock on mobile synchronously inside click)
-  const handleStartNewGame = (speciesId: string, factionId: string, playerName: string) => {
+  const handleStartNewGame = (
+    speciesId: string,
+    factionId: string,
+    playerName: string,
+    playerGender: CharacterGender = 'M'
+  ) => {
     enterGameFullscreen(true);
     soundEngine.playClick();
-    const fresh = createStarterCampaign(speciesId, factionId, playerName);
+    const fresh = createStarterCampaign(speciesId, factionId, playerName, playerGender);
     setCampaign(fresh);
     setActiveEnemies([]);
     setPendingEncounter(null);
+    setHostileCountdown(null);
+    clearAllPlanetDefenseTimers();
+    bombardWeaponCooldownRef.current = 0;
+    setBombardWeaponCooldownSec(0);
+    damageItemCooldownRef.current = 0;
+    setDamageItemCooldownSec(0);
+    setCombatBlastPulse(null);
     setHullDestroyedModal(false);
     setMining(null);
     shipMovingInSpaceRef.current = false;
@@ -953,6 +1045,13 @@ export default function App() {
     setCampaign(existingSave);
     setActiveEnemies([]);
     setPendingEncounter(null);
+    setHostileCountdown(null);
+    clearAllPlanetDefenseTimers();
+    bombardWeaponCooldownRef.current = 0;
+    setBombardWeaponCooldownSec(0);
+    damageItemCooldownRef.current = 0;
+    setDamageItemCooldownSec(0);
+    setCombatBlastPulse(null);
     setHullDestroyedModal(false);
     shipMovingInSpaceRef.current = false;
     setTravelTargetPlanetId(null);
@@ -1065,7 +1164,7 @@ export default function App() {
             weaponId: 'laser_civil_mk1',
             shieldIds: [],
             jumpDriveId: 'motor_curto_mk1',
-            extractorIds: ['broca_mineral_basica'],
+            extractorIds: [],
             utilityIds: [],
             suitGearIds: [],
             depot: [],
@@ -1275,6 +1374,7 @@ export default function App() {
           setFleeState(null);
           if (escaped) {
             setActiveEnemies([]);
+            setCombatBlastPulse(null);
             setHostileCountdown(null);
             soundEngine.playWarp();
             notify('Fuga bem-sucedida! Você escapou dos perseguidores entre planetas e asteroides.');
@@ -1361,10 +1461,9 @@ export default function App() {
                 } else if (orbLevel >= 3 && !mine.surface) {
                   const lic = getSystemExtractionLicenseStatus(sys, orbLevel, c);
                   if (!lic.licensed && Math.random() < 0.18) {
-                    const shipObj = c.ships.find((s) => s.uid === c.activeShipUid) ?? c.ships[0];
                     const cond = evaluatePlanetConditionRisk(
                       planetForRisk(planet, c),
-                      shipObj.suitGearIds,
+                      getCrewSuitIds(c),
                       bon.explorerBonus,
                       bon.hazardResistBonus
                     );
@@ -1373,10 +1472,9 @@ export default function App() {
                     atmosphericRiskFactionId = getPlanetControllingFaction(planet, c) ?? sys.controllingFactionId;
                   }
                 } else if (mine.surface && orbLevel >= 2 && Math.random() < 0.08) {
-                  const shipObj = c.ships.find((s) => s.uid === c.activeShipUid) ?? c.ships[0];
                   const cond = evaluatePlanetConditionRisk(
                     planetForRisk(planet, c),
-                    shipObj.suitGearIds,
+                    getCrewSuitIds(c),
                     bon.explorerBonus,
                     bon.hazardResistBonus
                   );
@@ -1396,61 +1494,81 @@ export default function App() {
         }
       }
 
-      // 2. Hostile Orbit Intrusion Check (Section 16.3)
+      // 2. Hostile Orbit Detection & Per-Planet 60s Defense Re-Scan Cooldown + 60s Bombard / 10s Damage Item Cooldowns
+      if (bombardWeaponCooldownRef.current > 0) {
+        const nextBombardCd = Math.max(0, bombardWeaponCooldownRef.current - 0.25);
+        bombardWeaponCooldownRef.current = nextBombardCd;
+        setBombardWeaponCooldownSec(nextBombardCd);
+      }
+      if (damageItemCooldownRef.current > 0) {
+        const nextDmgItemCd = Math.max(0, damageItemCooldownRef.current - 0.25);
+        damageItemCooldownRef.current = nextDmgItemCd;
+        setDamageItemCooldownSec(nextDmgItemCd);
+      }
+
+      const prevDefenseCooldowns = planetDefenseCooldownsRef.current;
+      let defenseCooldownsChanged = false;
+      const nextDefenseCooldowns: Record<string, number> = {};
+      const expiredDefensePlanetIds = new Set<string>();
+      for (const [plId, sec] of Object.entries(prevDefenseCooldowns)) {
+        if (sec > 0) {
+          defenseCooldownsChanged = true;
+          const rem = Math.max(0, sec - 0.25);
+          if (rem > 0) {
+            nextDefenseCooldowns[plId] = rem;
+          } else {
+            expiredDefensePlanetIds.add(plId);
+          }
+        }
+      }
+
+      let newlyStartedDefensePlanetId: string | null = null;
       if (inOrbit && c.orbitingPlanetId) {
         const orbPlanet = sys.planets.find((p) => p.id === c.orbitingPlanetId);
         const orbLevel = orbPlanet ? getPlanetCurrentLevel(orbPlanet, c) : 0;
         const orbFacId = orbPlanet ? getPlanetControllingFaction(orbPlanet, c) : null;
-        const isAtWar = Boolean(
-          orbFacId &&
-            orbFacId !== c.chosenFactionId &&
-            ((c.activeWars[c.chosenFactionId] ?? []).includes(orbFacId) ||
-              (c.activeWars[orbFacId] ?? []).includes(c.chosenFactionId))
-        );
+        const isAtWar = Boolean(orbFacId && isAtWarWithPlayer(c, orbFacId));
         const isHostile =
           orbLevel >= 3 &&
           orbFacId &&
           ((c.factionRenown[orbFacId] ?? 0) <= -30 || isAtWar);
 
-        if (isHostile && orbFacId) {
-          if (hostileCountdown === null && !inCombat) {
-            setHostileCountdown(10);
-            soundEngine.playAlert();
-          } else if (hostileCountdown !== null && hostileCountdown > 0) {
-            const nextCd = Math.max(0, hostileCountdown - 0.25);
-            setHostileCountdown(nextCd);
-            if (nextCd === 0) {
+        if (isHostile && orbFacId && orbPlanet) {
+          if (expiredDefensePlanetIds.has(orbPlanet.id)) {
+            // 60s window finished while player is still in enemy orbit -> new detection attempt based on tech diff + cloak
+            const curShip = c.ships.find((s) => s.uid === c.activeShipUid) ?? c.ships[0];
+            const shipTech = curShip ? computeShipTechLevel(curShip) : 1;
+            const planetTech = getEffectivePlanetTechLevel(orbPlanet, sys, c);
+            const detectionPct = computeEnemyOrbitDetectionChancePct(planetTech, shipTech, st.cloakReduction);
+            if (Math.random() * 100 < detectionPct) {
               const count = orbLevel >= 4 ? 3 : 2;
               const defenseTech = computeEnemyCombatTechLevel(orbFacId, sys, sys, c).techLevel;
-              const wave = buildEnemyWave(orbFacId, count, defenseTech, c.playerPos, 'Patrulha de Defesa');
+              const wave = buildEnemyWave(orbFacId, count, defenseTech, c.playerPos, 'Reforço Orbital');
               setActiveEnemies((prev) => [...prev, ...wave]);
-              setHostileWaveCooldown(orbLevel >= 4 ? 30 : 60);
-              setHostileCountdown(0);
+              newlyStartedDefensePlanetId = orbPlanet.id;
               soundEngine.playAlert();
-              notify(`Intrusão detectada. ${count} naves hostis de nível ${defenseTech} decolaram de ${orbPlanet?.name}.`);
+              notify(
+                `Nova varredura de ${orbPlanet.name} detectou sua nave (${detectionPct}% de risco)! ${count} naves de nível ${defenseTech} enviadas.`
+              );
+            } else {
+              notify(
+                `Varredura de ${orbPlanet.name} após 60s não localizou sua nave (${detectionPct}% de risco).`
+              );
             }
-          } else if (hostileCountdown === 0) {
-            setHostileWaveCooldown((prevCd) => {
-              const nextWave = prevCd - 0.25;
-              if (nextWave <= 0) {
-                const count = orbLevel >= 4 ? 3 : 2;
-                const defenseTech = computeEnemyCombatTechLevel(orbFacId, sys, sys, c).techLevel;
-                const wave = buildEnemyWave(orbFacId, count, defenseTech, c.playerPos, 'Reforço Orbital');
-                setActiveEnemies((prev) => [...prev, ...wave]);
-                soundEngine.playAlert();
-                notify(`Reforços hostis. Mais ${count} naves de nível ${defenseTech} entraram em órbita.`);
-                return orbLevel >= 4 ? 30 : 60;
-              }
-              return nextWave;
-            });
           }
-        } else if (hostileCountdown !== null) {
-          setHostileCountdown(null);
-          setHostileWaveCooldown(0);
         }
-      } else if (hostileCountdown !== null) {
+      }
+      if (hostileCountdown !== null) {
         setHostileCountdown(null);
-        setHostileWaveCooldown(0);
+      }
+
+      if (newlyStartedDefensePlanetId) {
+        nextDefenseCooldowns[newlyStartedDefensePlanetId] = 60;
+        defenseCooldownsChanged = true;
+      }
+      if (defenseCooldownsChanged) {
+        planetDefenseCooldownsRef.current = nextDefenseCooldowns;
+        setPlanetDefenseCooldowns(nextDefenseCooldowns);
       }
 
       // 3. In-system Random Encounter or Galactic Narrative Event Check (only while ship is moving in space)
@@ -1461,12 +1579,11 @@ export default function App() {
         !showGalacticMapRef.current &&
         !sys.isBlackHole
       ) {
-        const conflictSpeed = 1 + (sys.conflictLevel - 1) * 0.25;
-        const cloakSlow = 1 - Math.min(0.45, st.cloakReduction);
-        inSystemEncounterTimerRef.current -= dt * conflictSpeed * cloakSlow;
+        const conflictSpeed = 1 + (sys.conflictLevel - 1) * 0.22;
+        inSystemEncounterTimerRef.current -= dt * conflictSpeed;
         if (inSystemEncounterTimerRef.current <= 0) {
-          inSystemEncounterTimerRef.current = (24 + Math.random() * 18) * 6;
-          if (Math.random() < 0.15 && triggerNarrativeEvent('VIAGEM_ESPACIAL', { ignoreCooldown: true })) {
+          inSystemEncounterTimerRef.current = 12 + Math.random() * 10;
+          if (Math.random() < 0.2 && triggerNarrativeEvent('VIAGEM_ESPACIAL', { ignoreCooldown: true })) {
             // Triggered galactic narrative event
           } else {
             spawnRandomEncounter(sys, sys, c, c.playerPos);
@@ -1500,9 +1617,8 @@ export default function App() {
         const ship = prev.ships.find((s) => s.uid === prev.activeShipUid) ?? prev.ships[0];
         const shipDerived = computeShipDerivedStats(ship, computeCrewBonuses(prev));
 
-        // Supplies drain ONLY outside planet orbit (reduced by 35%)
-        const totalSkill = prev.crew.reduce((s, m) => s + m.skill, 0);
-        const supplyDrain = inOrbit ? 0 : ((totalSkill * bon.supplyCostMult) / 60) * dt * (1.5 / 2.5) * 0.65;
+        // Supplies drain ONLY outside planet orbit
+        const supplyDrain = inOrbit ? 0 : computeCrewSupplyDrainPerSec(prev.crew, bon.supplyCostMult) * dt;
         const nextSupplies = Math.max(0, prev.supplies - supplyDrain);
 
         const maxCrewHealth = 100 + Math.max(0, prev.healthPotency ?? 0);
@@ -1695,6 +1811,9 @@ export default function App() {
       const allDeadCount = Math.max(defeatedEnemies.length, killedSet.size + finalEnemies.filter((e) => e.hull <= 0).length);
 
       setActiveEnemies(survivors);
+      if (survivors.length === 0) {
+        setCombatBlastPulse(null);
+      }
 
       // Apply damage to player shield & armor-mitigated hull
       if (accDmg > 0 || allDeadCount > 0) {
@@ -1848,9 +1967,10 @@ export default function App() {
     setFleeState(null);
     setPendingEncounter(null);
     setHostileCountdown(null);
+    clearAllPlanetDefenseTimers();
     setDrawer({ kind: 'none' });
     pendingMiningAfterEventRef.current = null;
-    inSystemEncounterTimerRef.current = (20 + Math.random() * 14) * 2;
+    inSystemEncounterTimerRef.current = 8 + Math.random() * 7;
 
     // Reveal neighboring factions within jump/scanner range
     const nearbySystems = getSystemsInRadius(target, shipStats.hasLongScanner ? 26 : 18).map((s) =>
@@ -1902,24 +2022,27 @@ export default function App() {
     setCampaign(updatedCampaign);
 
     // Random Encounter or Galactic Narrative Event Roll on Jump (triggered cleanly right as ship exits warp tunnel)
-    const hostileRollChance = Math.max(10, target.hostileChancePct * (1 - shipStats.cloakReduction));
-    const triggerChance = Math.min(82, 34 + hostileRollChance * 0.5);
+    const hostileRollChance = Math.max(12, target.hostileChancePct * (1 - shipStats.cloakReduction));
+    const triggerChance = Math.min(88, 46 + hostileRollChance * 0.55);
     const rollJumpEvent = Math.random() * 100;
-    const shouldTriggerEncounter = rollJumpEvent < (triggerChance * 0.65 / 6) && !target.isBlackHole;
+    const shouldTriggerEncounter = rollJumpEvent < triggerChance * 0.72 && !target.isBlackHole;
     const shouldTriggerNarrativeEvent =
-      !shouldTriggerEncounter && !target.isBlackHole && rollJumpEvent < (triggerChance / 6);
+      !shouldTriggerEncounter && !target.isBlackHole && rollJumpEvent < triggerChance;
 
     warpTimerRef.current = window.setTimeout(() => {
       setWarpTransition(null);
-      setShowGalacticMap(true);
       if (shouldTriggerEncounter) {
+        setShowGalacticMap(false);
         spawnRandomEncounter(target, targetFull, updatedCampaign, entryPos);
       } else if (shouldTriggerNarrativeEvent) {
+        setShowGalacticMap(false);
         triggerNarrativeEvent('VIAGEM_ESPACIAL', {
           ignoreCooldown: true,
           campaignOverride: updatedCampaign,
           systemOverride: targetFull,
         });
+      } else {
+        setShowGalacticMap(true);
       }
     }, 1850);
   };
@@ -1949,50 +2072,95 @@ export default function App() {
       setTravelTargetPlanetId(null);
       setTravelTargetPhenomenonId(null);
       setAtPhenomenonId(null);
-      setCampaign((prev) => (prev ? { ...prev, orbitingPlanetId: planetId } : prev));
 
       const cur = campaignRef.current;
       const sys = currentSystemRef.current;
       let arrivedPlanet: PlanetData | null = null;
+      let arrivedLevel = 0;
+
       if (cur && sys) {
         const orbPlanet = sys.planets.find((p) => p.id === planetId) ?? null;
         arrivedPlanet = orbPlanet;
         if (orbPlanet) {
-          const orbLevel = getPlanetCurrentLevel(orbPlanet, cur);
+          arrivedLevel = getPlanetCurrentLevel(orbPlanet, cur);
           const orbFacId = getPlanetControllingFaction(orbPlanet, cur) ?? sys.controllingFactionId;
-          const isAtWar = Boolean(
-            orbFacId &&
-              orbFacId !== cur.chosenFactionId &&
-              ((cur.activeWars[cur.chosenFactionId] ?? FACTIONS_BY_ID[cur.chosenFactionId]?.warsWith ?? []).includes(
-                orbFacId
-              ) ||
-                (cur.activeWars[orbFacId] ?? FACTIONS_BY_ID[orbFacId]?.warsWith ?? []).includes(cur.chosenFactionId))
+          const isAtWar = Boolean(orbFacId && isAtWarWithPlayer(cur, orbFacId));
+          const isEnemyPlanet = Boolean(
+            arrivedLevel >= 3 &&
+              orbFacId &&
+              (isAtWar || (cur.factionRenown[orbFacId] ?? 0) <= -30)
           );
 
-          if (orbLevel >= 3 && orbFacId && isAtWar) {
-            const count = orbLevel >= 4 ? 3 : 2;
-            const defenseTech = computeEnemyCombatTechLevel(orbFacId, sys, sys, cur).techLevel;
-            const wave = buildEnemyWave(
-              orbFacId,
-              count,
-              defenseTech,
-              cur.playerPos,
-              'Defesa Planetária'
-            );
-            setActiveEnemies((prev) => [...prev, ...wave]);
-            setHostileCountdown(0);
-            setHostileWaveCooldown(orbLevel >= 4 ? 30 : 60);
-            setDrawer({ kind: 'combat' });
-            soundEngine.playAlert();
-            notify(
-              `Alerta de Guerra! Sistemas de defesa de ${orbPlanet.name} (${FACTIONS_BY_ID[orbFacId]?.name ?? orbFacId}) ativados em órbita!`
-            );
-            return;
+          if (isEnemyPlanet && orbFacId) {
+            const activeDefenseCd = planetDefenseCooldownsRef.current[planetId] ?? 0;
+            if (activeDefenseCd <= 0) {
+              const shipObj = cur.ships.find((s) => s.uid === cur.activeShipUid) ?? cur.ships[0];
+              const bonNow = computeCrewBonuses(cur);
+              const shipDerivedNow = shipObj ? computeShipDerivedStats(shipObj, bonNow) : null;
+              const shipTech = shipObj ? computeShipTechLevel(shipObj) : 1;
+              const planetTech = getEffectivePlanetTechLevel(orbPlanet, sys, cur);
+              const detectionPct = computeEnemyOrbitDetectionChancePct(
+                planetTech,
+                shipTech,
+                shipDerivedNow?.cloakReduction ?? 0
+              );
+
+              if (Math.random() * 100 < detectionPct) {
+                const count = arrivedLevel >= 4 ? 3 : 2;
+                const defenseTech = computeEnemyCombatTechLevel(orbFacId, sys, sys, cur).techLevel;
+                const wave = buildEnemyWave(
+                  orbFacId,
+                  count,
+                  defenseTech,
+                  cur.playerPos,
+                  'Defesa Planetária'
+                );
+                setCampaign((prev) => (prev ? { ...prev, orbitingPlanetId: planetId } : prev));
+                setActiveEnemies((prev) => [...prev, ...wave]);
+                setHostileCountdown(null);
+                setPlanetDefenseTimer(planetId, 60);
+                setDrawer({ kind: 'combat' });
+                soundEngine.playAlert();
+                notify(
+                  `Sensores de ${orbPlanet.name} detectaram sua nave (${detectionPct}% de risco)! Defesa ativada (nova varredura em 60s).`
+                );
+                return;
+              }
+
+              notify(
+                `Aproximação furtiva em ${orbPlanet.name}: sensores inimigos não detectaram sua nave (${detectionPct}% de risco).`
+              );
+            }
           }
         }
       }
 
-      // Open the Action Panel automatically upon entering non-war orbit
+      setCampaign((prev) => {
+        if (!prev) return prev;
+        let completedLowLevelBombard = false;
+        const nextMissions =
+          arrivedLevel <= 1
+            ? prev.missions.map((m) => {
+                if (
+                  m.status === 'aceita' &&
+                  m.type === 'guerra' &&
+                  m.warKind === 'bombardeio' &&
+                  !m.bombardCompleted &&
+                  m.targetPlanetId === planetId
+                ) {
+                  completedLowLevelBombard = true;
+                  return { ...m, bombardCompleted: true };
+                }
+                return m;
+              })
+            : prev.missions;
+        if (completedLowLevelBombard) {
+          return { ...prev, orbitingPlanetId: planetId, missions: nextMissions };
+        }
+        return { ...prev, orbitingPlanetId: planetId };
+      });
+
+      // Open the Action Panel upon entering non-enemy orbit, undetected enemy orbit, or during 60s window
       setDrawer({ kind: 'planet', planetId });
       if (arrivedPlanet) {
         window.setTimeout(() => {
@@ -2000,7 +2168,7 @@ export default function App() {
         }, 250);
       }
     },
-    [notify, triggerNarrativeEvent]
+    [notify, setPlanetDefenseTimer, triggerNarrativeEvent]
   );
 
   const handleTravelToPhenomenon = (phenId: string) => {
@@ -2121,11 +2289,12 @@ export default function App() {
 
     const actualLevel = getPlanetCurrentLevel(planet, campaign);
     const activeExplorer = campaign.crew.find((c) => c.status === 'ativo' && c.role === 'explorador');
-    const suitStats = getSuitGearEffectiveStats(activeShip.suitGearIds, bonuses.activeTechCategory);
+    const crewSuitIds = getCrewSuitIds(campaign);
+    const suitStats = getSuitGearEffectiveStats(crewSuitIds, bonuses.activeTechCategory);
     const gearPower = suitStats.combatPower + suitStats.explorationBonus;
     const riskInfo = evaluatePlanetConditionRisk(
       planetForRisk(planet, campaign),
-      activeShip.suitGearIds,
+      crewSuitIds,
       bonuses.explorerBonus,
       bonuses.hazardResistBonus
     );
@@ -2558,11 +2727,12 @@ export default function App() {
     const res = RESOURCES_BY_ID[dep.resourceId];
     if (!res) return;
 
-    const matchingExtractors = activeShip.extractorIds
+    const combinedExtractorIds = [...activeShip.extractorIds, ...getCrewManualExtractorIds(campaign)];
+    const matchingExtractors = combinedExtractorIds
       .map((id) => EXTRACTORS_BY_ID[id])
       .filter((ex) => ex && ex.extractionClass === res.extractionClass);
     if (matchingExtractors.length === 0) {
-      notify('A nave não tem a ferramenta certa para esse minério.');
+      notify('Você precisa da ferramenta certa (na nave ou na tripulação) para esse recurso.');
       return;
     }
 
@@ -2573,7 +2743,7 @@ export default function App() {
     }
 
     const totalRate = getEffectiveExtractorRate(
-      activeShip.extractorIds,
+      combinedExtractorIds,
       res.extractionClass,
       bonuses.activeTechCategory,
       bonuses.minerRateMult,
@@ -2582,7 +2752,7 @@ export default function App() {
     const actualLevel = getPlanetCurrentLevel(planet, campaign);
     const riskInfo = evaluatePlanetConditionRisk(
       planetForRisk(planet, campaign),
-      activeShip.suitGearIds,
+      getCrewSuitIds(campaign),
       bonuses.explorerBonus,
       bonuses.hazardResistBonus
     );
@@ -2723,17 +2893,27 @@ export default function App() {
       return;
     }
 
+    if (bombardWeaponCooldownRef.current > 0) {
+      notify(`Arma de bombardeio recarregando: aguarde ${Math.ceil(bombardWeaponCooldownRef.current)}s.`);
+      return;
+    }
+
     const actualLevel = getPlanetCurrentLevel(planet, campaign);
     if (actualLevel < 2) {
       notify('Planeta já está em nível mínimo.');
       return;
     }
 
+    // Trigger 60s bombardment weapon respawn cooldown & multi-explosion animation on planet
+    bombardWeaponCooldownRef.current = 60;
+    setBombardWeaponCooldownSec(60);
+    triggerBombardPulse(planet.id);
     soundEngine.playAlert();
+
     const ctrlFacId = getPlanetControllingFaction(planet, campaign) ?? currentSystem.controllingFactionId;
     const planetTech = getEffectivePlanetTechLevel(planet, currentSystem, campaign);
 
-    // Level 2: reduces level directly without ship defense; Level 3-5: chance to reduce + activates defense ships!
+    // Level 2: reduces level directly without ship defense; Level 3-5: chance to reduce + activates defense ships if not on 60s cooldown
     const reduceChance =
       actualLevel === 2
         ? 1.0
@@ -2741,25 +2921,52 @@ export default function App() {
     const levelReduced = Math.random() < reduceChance;
     const nextLevel = levelReduced ? Math.max(0, actualLevel - 1) : actualLevel;
 
-    // Activate planetary defense ships on level 3+
+    // Activate planetary defense ships on level 3+ ONLY if planet is not on its 60s cooldown
+    let defenseLaunchedNow = false;
     if (actualLevel >= 3) {
-      const defFacId = ctrlFacId ?? FACTIONS[0].id;
-      const shipCount = actualLevel === 5 ? 4 : actualLevel === 4 ? 3 : 2;
-      const defenseTech = Math.max(planetTech, actualLevel - 1);
-      const defenseWave = buildEnemyWave(
-        defFacId,
-        shipCount,
-        defenseTech,
-        campaign.playerPos,
-        'Defesa Planetária'
-      );
-      setActiveEnemies((prev) => [...prev, ...defenseWave]);
+      const currentDefenseCd = planetDefenseCooldownsRef.current[planet.id] ?? 0;
+      if (currentDefenseCd <= 0) {
+        const defFacId = ctrlFacId ?? FACTIONS[0].id;
+        const shipCount = actualLevel === 5 ? 4 : actualLevel === 4 ? 3 : 2;
+        const defenseTech = Math.max(planetTech, actualLevel - 1);
+        const defenseWave = buildEnemyWave(
+          defFacId,
+          shipCount,
+          defenseTech,
+          campaign.playerPos,
+          'Defesa Planetária',
+          { isElite: actualLevel >= 5 }
+        );
+        setActiveEnemies((prev) => [...prev, ...defenseWave]);
+        setPlanetDefenseTimer(planet.id, 60);
+        defenseLaunchedNow = true;
+      }
     }
+
+    const willCollapse =
+      Boolean(currentSystem.controllingFactionId) &&
+      currentSystem.planets.every((pl) => {
+        const lv = pl.id === planet.id ? nextLevel : campaign.planetOverrides[pl.id]?.level ?? pl.level;
+        return lv <= 1;
+      });
+    const hasMatchingMission = campaign.missions.some(
+      (m) =>
+        m.status === 'aceita' &&
+        m.type === 'guerra' &&
+        m.warKind === 'bombardeio' &&
+        !m.bombardCompleted &&
+        (m.targetPlanetId ? m.targetPlanetId === planet.id : m.targetSystemId === currentSystem.id)
+    );
+    const mainMsg = willCollapse
+      ? `Bombardeio devastador! ${currentSystem.name} perdeu todo o controle de facção e virou Espaço Selvagem!`
+      : levelReduced
+      ? `O bombardeio em ${planet.name} derruba a civilização para o nível ${nextLevel}.${defenseLaunchedNow ? ' A defesa local sobe.' : ''}`
+      : `O bombardeio em ${planet.name} encontra os escudos continentais. A civilização segue no nível ${actualLevel}.${defenseLaunchedNow ? ' A defesa local sobe.' : ''}`;
 
     setCampaign((prev) => {
       if (!prev) return prev;
       const prevOv = prev.planetOverrides[planet.id] ?? {};
-      let nextPlanetOverrides: PlayerCampaignState['planetOverrides'] = {
+      const nextPlanetOverrides: PlayerCampaignState['planetOverrides'] = {
         ...prev.planetOverrides,
         [planet.id]: {
           ...prevOv,
@@ -2788,9 +2995,7 @@ export default function App() {
         return lv <= 1;
       });
 
-      let systemCollapsed = false;
       if (allReducedToZeroOrOne && currentSystem.controllingFactionId) {
-        systemCollapsed = true;
         nextSystemOwners[currentSystem.id] = WILD_SYSTEM_SENTINEL;
         for (const pl of currentSystem.planets) {
           nextPlanetOverrides[pl.id] = {
@@ -2808,7 +3013,6 @@ export default function App() {
         nextLogs.push(makeLog('combate', collapseMsg, prev.gameTimeSeconds));
       }
 
-      let matchedBombardMission = false;
       const nextMissions = prev.missions.map((m) => {
         if (
           m.status === 'aceita' &&
@@ -2817,24 +3021,12 @@ export default function App() {
           !m.bombardCompleted &&
           (m.targetPlanetId ? m.targetPlanetId === planet.id : m.targetSystemId === currentSystem.id)
         ) {
-          matchedBombardMission = true;
           return { ...m, bombardCompleted: true };
         }
         return m;
       });
 
-      const mainMsg = systemCollapsed
-        ? `Bombardeio devastador! ${currentSystem.name} perdeu todo o controle de facção e virou Espaço Selvagem!`
-        : levelReduced
-        ? `O bombardeio em ${planet.name} derruba a civilização para o nível ${nextLevel}.${actualLevel >= 3 ? ' A defesa local sobe.' : ''}`
-        : `O bombardeio em ${planet.name} encontra os escudos continentais. A civilização segue no nível ${actualLevel}. A defesa local sobe.`;
-
       nextLogs.push(makeLog('combate', mainMsg, prev.gameTimeSeconds));
-      notify(
-        matchedBombardMission
-          ? `${mainMsg} Missão de bombardeio cumprida!`
-          : mainMsg
-      );
 
       return {
         ...prev,
@@ -2846,6 +3038,8 @@ export default function App() {
         logbook: nextLogs,
       };
     });
+
+    notify(hasMatchingMission ? `${mainMsg} Missão de bombardeio cumprida!` : mainMsg);
   };
 
   const handleBuyExtractionLicense = () => {
@@ -3381,12 +3575,42 @@ export default function App() {
     category: EncounterGearCategory,
     itemId: string,
     slotIndex: number,
-    price: number
+    price: number,
+    source?: 'ship' | 'crew',
+    crewUid?: string
   ) => {
     if (!campaign || price <= 0) return;
+    const meta = getEquipmentMeta(category, itemId);
+    if (source === 'crew' || category === 'suit') {
+      const list = campaign.crewEquipment ?? [];
+      const targetIdx = crewUid
+        ? list.findIndex((entry) => entry.uid === crewUid && entry.itemId === itemId)
+        : list.findIndex((entry, idx) => idx === slotIndex && entry.itemId === itemId);
+      if (targetIdx < 0) return;
+      soundEngine.playClick();
+      setCampaign((prev) => {
+        if (!prev) return prev;
+        const curList = prev.crewEquipment ?? [];
+        const removeIdx = crewUid
+          ? curList.findIndex((entry) => entry.uid === crewUid && entry.itemId === itemId)
+          : curList.findIndex((entry, idx) => idx === slotIndex && entry.itemId === itemId);
+        if (removeIdx < 0) return prev;
+        return {
+          ...prev,
+          crewEquipment: curList.filter((_, idx) => idx !== removeIdx),
+          credits: prev.credits + price,
+          logbook: [
+            ...prev.logbook,
+            makeLog('comercio', `${meta.name} vendido no encontro por ${price} créditos.`, prev.gameTimeSeconds),
+          ],
+        };
+      });
+      notify(`${meta.name} vendido por ${price} créditos.`);
+      return;
+    }
+
     const ship = campaign.ships.find((entry) => entry.uid === campaign.activeShipUid) ?? campaign.ships[0];
     if (!ship || !detachInstalledGear(ship, category, itemId, slotIndex)) return;
-    const meta = getEquipmentMeta(category, itemId);
     soundEngine.playClick();
     setCampaign((prev) => {
       if (!prev) return prev;
@@ -3411,6 +3635,18 @@ export default function App() {
     if (!campaign || !activeShip || !shipStats || campaign.credits < price) return;
     const def = CONSUMABLES_BY_ID[consumableId];
     if (!def) return;
+    const planetId = campaign.orbitingPlanetId;
+    const orbPlanet = planetId && currentSystem ? currentSystem.planets.find((p) => p.id === planetId) : null;
+    const planetTech = orbPlanet && currentSystem ? getEffectivePlanetTechLevel(orbPlanet, currentSystem, campaign) : 1;
+    const stockKey = consumableStockKey(consumableId);
+    if (planetId) {
+      const purchased = campaign.planetPurchases?.[planetId]?.[stockKey] ?? 0;
+      const avail = planetConsumableRemainingStock(def.rarity ?? 'comum', planetTech, purchased);
+      if (avail <= 0) {
+        notify(`Estoque de ${def.name} esgotado neste planeta.`);
+        return;
+      }
+    }
     if (compartmentUsed(campaign, activeShip) + 1 > shipStats.cargoCapacity) {
       notify('O compartimento de carga não tem espaço.');
       return;
@@ -3418,6 +3654,25 @@ export default function App() {
     soundEngine.playClick();
     setCampaign((prev) => {
       if (!prev) return prev;
+      if (prev.credits < price) return prev;
+      const curPlanetId = prev.orbitingPlanetId;
+      if (curPlanetId && currentSystem) {
+        const curPl = currentSystem.planets.find((p) => p.id === curPlanetId);
+        const curTech = curPl ? getEffectivePlanetTechLevel(curPl, currentSystem, prev) : 1;
+        const prevPurchased = prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0;
+        if (planetConsumableRemainingStock(def.rarity ?? 'comum', curTech, prevPurchased) <= 0) {
+          return prev;
+        }
+      }
+      const nextPurchases = curPlanetId
+        ? {
+            ...(prev.planetPurchases ?? {}),
+            [curPlanetId]: {
+              ...(prev.planetPurchases?.[curPlanetId] ?? {}),
+              [stockKey]: (prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0) + 1,
+            },
+          }
+        : prev.planetPurchases;
       return {
         ...prev,
         credits: prev.credits - price,
@@ -3425,6 +3680,7 @@ export default function App() {
           ...prev.consumables,
           [consumableId]: (prev.consumables[consumableId] ?? 0) + 1,
         },
+        planetPurchases: nextPurchases,
       };
     });
     notify(`${def.name} foi para o compartimento de carga.`);
@@ -3466,77 +3722,14 @@ export default function App() {
   };
 
   const applyInstantCombatBlast = (damageAll: number, stripShieldPct: number, actionLabel: string) => {
-    if (!currentSystem || activeEnemies.length === 0) return;
-    const sys = currentSystem;
-    const defeatedEnemies: Array<{ factionId: string; techLevel: number; huntMissionId?: string }> = [];
-    const survivors: ActiveEnemy[] = [];
-
-    for (const enemy of activeEnemies) {
-      let sh = Math.max(0, enemy.shield * (1 - Math.max(0, Math.min(0.95, stripShieldPct))));
-      let hl = enemy.hull;
-      if (damageAll > 0) {
-        const absorbed = Math.min(sh, damageAll);
-        sh -= absorbed;
-        hl -= damageAll - absorbed;
-      }
-      if (hl > 0) {
-        survivors.push({ ...enemy, shield: sh, hull: hl });
-      } else {
-        defeatedEnemies.push({ factionId: enemy.factionId, techLevel: enemy.techLevel, huntMissionId: enemy.huntMissionId });
-      }
-    }
-
-    setActiveEnemies(survivors);
+    if (!currentSystem || enemiesRef.current.length === 0) return;
+    setCombatBlastPulse({
+      nonce: ++combatBlastNonceRef.current,
+      damageAll,
+      stripShieldPct,
+      label: actionLabel,
+    });
     soundEngine.playWeapon('plasma');
-
-    if (defeatedEnemies.length > 0) {
-      let warAnnouncement: string | null = null;
-      let levelUpNote: string | null = null;
-      setCampaign((prev) => {
-        if (!prev) return prev;
-        const curShip = prev.ships.find((s) => s.uid === prev.activeShipUid) ?? prev.ships[0];
-        const st = computeShipDerivedStats(curShip, computeCrewBonuses(prev));
-        const lootCr = defeatedEnemies.reduce(
-          (sum, enemy) => sum + 50 * Math.max(1, Math.round(enemy.techLevel)),
-          0
-        );
-        const enemyXp = defeatedEnemies.reduce(
-          (sum, enemy) => sum + 25 * Math.max(1, Math.round(enemy.techLevel)),
-          0
-        );
-        const xpRes = grantCharacterXp(prev.character, enemyXp);
-        if (xpRes.levelsGained > 0) {
-          levelUpNote = `Nível ${xpRes.nextCharacter.level} alcançado! +${xpRes.pointsGained} pontos em Nave → Personagem.`;
-        }
-        const lootResId = sys.rareMultiplier > 1.3 ? 'ligas_avancadas' : 'titanio';
-        const nextCargo = addCargoItem(prev.cargo, lootResId, defeatedEnemies.length * 2, 0, st.cargoCapacity, prev).nextCargo;
-        const nextMissions = markDefeatedHuntMissions(prev.missions, defeatedEnemies, survivors.length === 0, sys.id);
-
-        let updatedState: PlayerCampaignState = {
-          ...prev,
-          character: xpRes.nextCharacter,
-          credits: prev.credits + lootCr,
-          cargo: nextCargo,
-          missions: nextMissions,
-          logbook: [
-            ...prev.logbook,
-            makeLog(
-              'combate',
-              `${actionLabel}: ${defeatedEnemies.length} inimigo(s) abatido(s) em ${sys.name}! (+${lootCr} créditos, +${xpRes.xpAdded} XP)`,
-              prev.gameTimeSeconds
-            ),
-          ],
-        };
-        const warRes = applyPlayerKillToWars(updatedState, defeatedEnemies);
-        updatedState = warRes.nextCampaign;
-        if (warRes.announcements.length > 0) {
-          warAnnouncement = warRes.announcements[0];
-        }
-        return updatedState;
-      });
-      if (levelUpNote) notify(levelUpNote);
-      else if (warAnnouncement) notify(warAnnouncement);
-    }
   };
 
   const handleUseConsumable = (consumableId: string, source: 'compartimento' | 'cofre' = 'compartimento') => {
@@ -3577,7 +3770,11 @@ export default function App() {
         return;
       }
     }
-    if (def.kind === 'especial_raca') {
+    if (def.combatEffect?.damageAllEnemies) {
+      if (damageItemCooldownRef.current > 0) {
+        notify(`Itens de dano em recarga: aguarde ${Math.ceil(damageItemCooldownRef.current)}s.`);
+        return;
+      }
       const fx = def.combatEffect;
       const cmp = def.campaignEffect;
       const combatDmgOnly = Boolean(fx?.damageAllEnemies && !fx.hullHeal && !fx.shieldRestore && !cmp);
@@ -3738,8 +3935,12 @@ export default function App() {
       };
     });
 
-    if (def.kind === 'especial_raca' && def.combatEffect?.damageAllEnemies && activeEnemies.length > 0) {
-      applyInstantCombatBlast(Math.round(def.combatEffect.damageAllEnemies * totalConsumableMult), 0, def.name);
+    if (def.combatEffect?.damageAllEnemies) {
+      damageItemCooldownRef.current = 10;
+      setDamageItemCooldownSec(10);
+      if (enemiesRef.current.length > 0) {
+        applyInstantCombatBlast(Math.round(def.combatEffect.damageAllEnemies * totalConsumableMult), 0, def.name);
+      }
     }
 
     if (def.kind === 'sonda' && probeTargets.length > 0) {
@@ -3812,6 +4013,21 @@ export default function App() {
     price: number
   ) => {
     if (!campaign || !activeShip || !shipStats || campaign.credits < price) return;
+    const meta = getEquipmentMeta(category, itemId);
+    const planetId = campaign.orbitingPlanetId;
+    const stockKey = equipmentStockKey(category, itemId);
+    if (planetId && currentSystem) {
+      const orbPl = currentSystem.planets.find((p) => p.id === planetId);
+      const plTech = orbPl ? getEffectivePlanetTechLevel(orbPl, currentSystem, campaign) : 1;
+      const ctrlFacId = orbPl ? getPlanetControllingFaction(orbPl, campaign) ?? currentSystem.controllingFactionId : currentSystem.controllingFactionId;
+      const ctrlFac = ctrlFacId ? FACTIONS_BY_ID[ctrlFacId] : null;
+      const isMatch = Boolean(ctrlFac && meta.factionStyle === ctrlFac.techStyle);
+      const purchased = campaign.planetPurchases?.[planetId]?.[stockKey] ?? 0;
+      if (planetEquipmentRemainingStock(meta.rarity, plTech, isMatch, purchased) <= 0) {
+        notify(`Estoque de ${meta.name} esgotado neste planeta.`);
+        return;
+      }
+    }
     if (compartmentUsed(campaign, activeShip) + 1 > shipStats.cargoCapacity) {
       notify('O compartimento de carga não tem espaço.');
       return;
@@ -3825,12 +4041,35 @@ export default function App() {
     };
     setCampaign((prev) => {
       if (!prev) return prev;
+      if (prev.credits < price) return prev;
+      const curPlanetId = prev.orbitingPlanetId;
+      if (curPlanetId && currentSystem) {
+        const orbPl = currentSystem.planets.find((p) => p.id === curPlanetId);
+        const plTech = orbPl ? getEffectivePlanetTechLevel(orbPl, currentSystem, prev) : 1;
+        const ctrlFacId = orbPl ? getPlanetControllingFaction(orbPl, prev) ?? currentSystem.controllingFactionId : currentSystem.controllingFactionId;
+        const ctrlFac = ctrlFacId ? FACTIONS_BY_ID[ctrlFacId] : null;
+        const isMatch = Boolean(ctrlFac && meta.factionStyle === ctrlFac.techStyle);
+        const prevPurchased = prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0;
+        if (planetEquipmentRemainingStock(meta.rarity, plTech, isMatch, prevPurchased) <= 0) {
+          return prev;
+        }
+      }
+      const nextPurchases = curPlanetId
+        ? {
+            ...(prev.planetPurchases ?? {}),
+            [curPlanetId]: {
+              ...(prev.planetPurchases?.[curPlanetId] ?? {}),
+              [stockKey]: (prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0) + 1,
+            },
+          }
+        : prev.planetPurchases;
       return {
         ...prev,
         credits: prev.credits - price,
         ships: prev.ships.map((s) =>
           s.uid === activeShip.uid ? { ...s, depot: [...s.depot, stored] } : s
         ),
+        planetPurchases: nextPurchases,
       };
     });
     notify('A peça foi para o compartimento de carga.');
@@ -3887,6 +4126,7 @@ export default function App() {
     slotIndex: number
   ) => {
     if (!campaign || !activeShip || !shipStats) return;
+    if (category === 'suit') return;
     if (compartmentUsed(campaign, activeShip) + 1 > shipStats.cargoCapacity) {
       notify('O compartimento de carga não tem espaço para guardar essa peça.');
       return;
@@ -3897,7 +4137,7 @@ export default function App() {
       shieldIds: [...activeShip.shieldIds],
       extractorIds: [...activeShip.extractorIds],
       utilityIds: [...activeShip.utilityIds],
-      suitGearIds: [...activeShip.suitGearIds],
+      suitGearIds: [...(activeShip.suitGearIds ?? [])],
       depot: [...activeShip.depot],
     };
     const priceOf = () => {
@@ -3924,9 +4164,6 @@ export default function App() {
     } else if (category === 'utility' && next.utilityIds[slotIndex] === itemId) {
       next.utilityIds.splice(slotIndex, 1);
       removed = true;
-    } else if (category === 'suit' && next.suitGearIds[slotIndex] === itemId) {
-      next.suitGearIds.splice(slotIndex, 1);
-      removed = true;
     }
     if (!removed || !hull) return;
     next.depot.push({
@@ -3942,9 +4179,42 @@ export default function App() {
     notify('A peça voltou ao compartimento de carga.');
   };
 
+  const handleUnequipCrewGear = (crewGearUid: string) => {
+    if (!campaign || !activeShip || !shipStats) return;
+    const item = (campaign.crewEquipment ?? []).find((entry) => entry.uid === crewGearUid);
+    if (!item) return;
+    if (compartmentUsed(campaign, activeShip) + 1 > shipStats.cargoCapacity) {
+      notify('O compartimento de carga não tem espaço para guardar esse equipamento.');
+      return;
+    }
+    const meta = getEquipmentMeta(item.category, item.itemId);
+    soundEngine.playClick();
+    setCampaign((prev) => {
+      if (!prev) return prev;
+      const currentShip = prev.ships.find((s) => s.uid === prev.activeShipUid) ?? prev.ships[0];
+      const targetItem = (prev.crewEquipment ?? []).find((entry) => entry.uid === crewGearUid);
+      if (!currentShip || !targetItem) return prev;
+      const depotRecord = {
+        uid: `dep_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        category: targetItem.category,
+        itemId: targetItem.itemId,
+        avgCostPaid: targetItem.avgCostPaid,
+      };
+      return {
+        ...prev,
+        crewEquipment: (prev.crewEquipment ?? []).filter((entry) => entry.uid !== crewGearUid),
+        ships: prev.ships.map((s) =>
+          s.uid === currentShip.uid ? { ...s, depot: [...s.depot, depotRecord] } : s
+        ),
+      };
+    });
+    notify(`${meta.name} guardado no compartimento.`);
+  };
+
   const handleEquipFromDepot = (depotUid: string) => {
     soundEngine.playClick();
     let error: string | null = null;
+    let infoMsg: string | null = null;
     setCampaign((prev) => {
       if (!prev) return prev;
       const ship = prev.ships.find((entry) => entry.uid === prev.activeShipUid) ?? prev.ships[0];
@@ -3952,6 +4222,27 @@ export default function App() {
       if (!ship || !item) {
         error = 'A peça não está no compartimento.';
         return prev;
+      }
+      if (isCrewEquipableItem(item.category, item.itemId)) {
+        const meta = getEquipmentMeta(item.category, item.itemId);
+        const maint = getCrewItemMaintenancePerCycle(item.category, item.itemId);
+        infoMsg = `${meta.name} equipado na tripulação (+${maint} cr/ciclo).`;
+        error = null;
+        return {
+          ...prev,
+          crewEquipment: [
+            ...(prev.crewEquipment ?? []),
+            {
+              ...item,
+              uid: `creweq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            },
+          ],
+          ships: prev.ships.map((entry) =>
+            entry.uid === ship.uid
+              ? { ...entry, depot: ship.depot.filter((piece) => piece.uid !== depotUid) }
+              : entry
+          ),
+        };
       }
       const installed = installGearOnShip(ship, item);
       if (!installed.ok) {
@@ -3969,6 +4260,7 @@ export default function App() {
       };
     });
     if (error) notify(error);
+    else if (infoMsg) notify(infoMsg);
   };
 
   const applyVault = (run: (state: PlayerCampaignState) => VaultOp) => {
@@ -4015,6 +4307,15 @@ export default function App() {
         ]
       : prev.logbook;
 
+    const rawCmd = normalizeFactionCommand(prev.factionCommand);
+    const cleanedSquadron = (rawCmd.squadronShipUids ?? []).filter((id) => id !== targetShipUid);
+    const cleanedCollection = rawCmd.resourceCollection
+      ? {
+          ...rawCmd.resourceCollection,
+          shipUids: rawCmd.resourceCollection.shipUids.filter((id) => id !== targetShipUid),
+        }
+      : null;
+
     return {
       next: {
         ...prev,
@@ -4023,6 +4324,11 @@ export default function App() {
         chosenFactionId: newFactionId,
         knownFactionIds: Array.from(knownSet),
         factionRenown: nextRenown,
+        factionCommand: {
+          ...rawCmd,
+          squadronShipUids: cleanedSquadron,
+          resourceCollection: cleanedCollection && cleanedCollection.shipUids.length > 0 ? cleanedCollection : null,
+        },
         logbook: nextLogs,
       },
       switchedFactionName: factionChanged ? facName : undefined,
@@ -4033,6 +4339,15 @@ export default function App() {
     if (!campaign || campaign.credits < price) return;
     const h = HULLS_BY_ID[hullId];
     if (!h) return;
+    const planetId = campaign.orbitingPlanetId;
+    const stockKey = hullStockKey(hullId);
+    if (planetId) {
+      const purchased = campaign.planetPurchases?.[planetId]?.[stockKey] ?? 0;
+      if (planetHullRemainingStock(h.rarity, purchased) <= 0) {
+        notify(`Estoque de ${h.name} esgotado neste estaleiro.`);
+        return;
+      }
+    }
     soundEngine.playClick();
 
     const orbPlanet = campaign.orbitingPlanetId
@@ -4056,7 +4371,7 @@ export default function App() {
       weaponId: 'laser_civil_mk1',
       shieldIds: [],
       jumpDriveId: 'motor_curto_mk1',
-      extractorIds: ['broca_mineral_basica'],
+      extractorIds: [],
       utilityIds: [],
       suitGearIds: [],
       depot: [],
@@ -4064,9 +4379,27 @@ export default function App() {
     const facChanged = shipFactionId !== campaign.chosenFactionId;
     setCampaign((prev) => {
       if (!prev) return prev;
+      if (prev.credits < price) return prev;
+      const curPlanetId = prev.orbitingPlanetId;
+      if (curPlanetId) {
+        const prevPurchased = prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0;
+        if (planetHullRemainingStock(h.rarity, prevPurchased) <= 0) {
+          return prev;
+        }
+      }
+      const nextPurchases = curPlanetId
+        ? {
+            ...(prev.planetPurchases ?? {}),
+            [curPlanetId]: {
+              ...(prev.planetPurchases?.[curPlanetId] ?? {}),
+              [stockKey]: (prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0) + 1,
+            },
+          }
+        : prev.planetPurchases;
       const baseNext: PlayerCampaignState = {
         ...prev,
         credits: prev.credits - price,
+        planetPurchases: nextPurchases,
         logbook: [...prev.logbook, makeLog('comercio', `Nova nave adquirida: ${h.name}.`, prev.gameTimeSeconds)],
       };
       return applyShipSwitchAndFaction(baseNext, newShip.uid, [...prev.ships, newShip]).next;
@@ -4085,30 +4418,62 @@ export default function App() {
       return;
     }
     soundEngine.playClick();
-    setCampaign((prev) =>
-      prev
+    setCampaign((prev) => {
+      if (!prev) return prev;
+      const cmd = normalizeFactionCommand(prev.factionCommand);
+      const nextSquadron = (cmd.squadronShipUids ?? []).filter((id) => id !== shipUid);
+      const nextCollection = cmd.resourceCollection
         ? {
-            ...prev,
-            credits: prev.credits + sellPrice,
-            ships: prev.ships.filter((s) => s.uid !== shipUid),
+            ...cmd.resourceCollection,
+            shipUids: cmd.resourceCollection.shipUids.filter((id) => id !== shipUid),
           }
-        : prev
-    );
+        : null;
+      return {
+        ...prev,
+        credits: prev.credits + sellPrice,
+        ships: prev.ships.filter((s) => s.uid !== shipUid),
+        factionCommand: {
+          ...cmd,
+          squadronShipUids: nextSquadron,
+          resourceCollection: nextCollection && nextCollection.shipUids.length > 0 ? nextCollection : null,
+        },
+      };
+    });
     notify(`Nave vendida por ${sellPrice.toLocaleString('pt-BR')} créditos.`);
   };
 
   const handleBuyBlueprint = (blueprintId: string, price: number) => {
     if (!campaign || campaign.credits < price || campaign.blueprintsOwned.includes(blueprintId)) return;
+    const planetId = campaign.orbitingPlanetId;
+    const stockKey = blueprintStockKey(blueprintId);
+    if (planetId) {
+      const purchased = campaign.planetPurchases?.[planetId]?.[stockKey] ?? 0;
+      if (planetBlueprintRemainingStock(purchased) <= 0) {
+        notify('Este projeto já se esgotou neste planeta.');
+        return;
+      }
+    }
     soundEngine.playClick();
-    setCampaign((prev) =>
-      prev
+    setCampaign((prev) => {
+      if (!prev) return prev;
+      if (prev.credits < price || prev.blueprintsOwned.includes(blueprintId)) return prev;
+      const curPlanetId = prev.orbitingPlanetId;
+      const nextPurchases = curPlanetId
         ? {
-            ...prev,
-            credits: prev.credits - price,
-            blueprintsOwned: [...prev.blueprintsOwned, blueprintId],
+            ...(prev.planetPurchases ?? {}),
+            [curPlanetId]: {
+              ...(prev.planetPurchases?.[curPlanetId] ?? {}),
+              [stockKey]: (prev.planetPurchases?.[curPlanetId]?.[stockKey] ?? 0) + 1,
+            },
           }
-        : prev
-    );
+        : prev.planetPurchases;
+      return {
+        ...prev,
+        credits: prev.credits - price,
+        blueprintsOwned: [...prev.blueprintsOwned, blueprintId],
+        planetPurchases: nextPurchases,
+      };
+    });
     notify('Projeto adquirido para o Estaleiro!');
   };
 
@@ -4161,7 +4526,7 @@ export default function App() {
           weaponId: 'laser_civil_mk1',
           shieldIds: [],
           jumpDriveId: 'motor_curto_mk1',
-          extractorIds: ['broca_mineral_basica'],
+          extractorIds: [],
           utilityIds: [],
           suitGearIds: [],
           depot: [],
@@ -4197,20 +4562,26 @@ export default function App() {
 
   const handleHireCrew = (candidate: CrewMember) => {
     if (!campaign || campaign.credits < candidate.hireCost) return;
+    if ((campaign.hiredCrewCandidateIds ?? []).includes(candidate.id)) return;
     soundEngine.playClick();
-    setCampaign((prev) =>
-      prev
-        ? {
-            ...prev,
-            credits: prev.credits - candidate.hireCost,
-            crew: [...prev.crew, candidate],
-            logbook: [
-              ...prev.logbook,
-              makeLog('tripulacao', `Tripulante ${candidate.name} contratado como ${candidate.role}.`, prev.gameTimeSeconds),
-            ],
-          }
-        : prev
-    );
+    const hiredMember: CrewMember = {
+      ...candidate,
+      id: `crew_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    };
+    setCampaign((prev) => {
+      if (!prev || prev.credits < candidate.hireCost) return prev;
+      if ((prev.hiredCrewCandidateIds ?? []).includes(candidate.id)) return prev;
+      return {
+        ...prev,
+        credits: prev.credits - candidate.hireCost,
+        crew: [...prev.crew, hiredMember],
+        hiredCrewCandidateIds: [...(prev.hiredCrewCandidateIds ?? []), candidate.id],
+        logbook: [
+          ...prev.logbook,
+          makeLog('tripulacao', `Tripulante ${candidate.name} contratado como ${candidate.role}.`, prev.gameTimeSeconds),
+        ],
+      };
+    });
     notify(`${candidate.name} embarcou na tripulação!`);
   };
 
@@ -4246,10 +4617,22 @@ export default function App() {
   };
 
   const handleDismissCrew = (crewId: string) => {
+    const member = campaign?.crew.find((m) => m.id === crewId);
+    if (!member) return;
     soundEngine.playClick();
     setCampaign((prev) =>
-      prev ? { ...prev, crew: prev.crew.filter((m) => m.id !== crewId) } : prev
+      prev
+        ? {
+            ...prev,
+            crew: prev.crew.filter((m) => m.id !== crewId),
+            logbook: [
+              ...prev.logbook,
+              makeLog('tripulacao', `Tripulante ${member.name} foi dispensado da nave.`, prev.gameTimeSeconds),
+            ],
+          }
+        : prev
     );
+    notify(`${member.name} foi dispensado da tripulação.`);
   };
 
   const handleSpendAttributePoint = (attrId: CharacterAttributeId) => {
@@ -4594,7 +4977,11 @@ export default function App() {
     return (
       <div className="relative h-full w-full overflow-hidden bg-[#040710] text-slate-100 select-none">
         {vnNodes && vnNodes[vnIndex] && (
-          <VisualNovelOverlay node={vnNodes[vnIndex]} onSelectChoice={handleVnChoice} />
+          <VisualNovelOverlay
+            node={vnNodes[vnIndex]}
+            playerGender={campaign.playerGender ?? 'M'}
+            onSelectChoice={handleVnChoice}
+          />
         )}
       </div>
     );
@@ -4659,6 +5046,8 @@ export default function App() {
             travelTargetPhenomenonId={travelTargetPhenomenonId}
             miningTargetId={mining?.depositId ?? null}
             landingPulse={landingPulse}
+            bombardPulse={bombardPulse}
+            combatBlastPulse={combatBlastPulse}
             dockedPlanetId={dockedPlanetId}
             activeEnemies={activeEnemies}
             isFleeing={Boolean(fleeState?.active)}
@@ -4675,6 +5064,8 @@ export default function App() {
                 : null
             }
             defenseCombatBonusPct={planetaryDefenseBuff?.bonusPct ?? 0}
+            planetDefenseCooldowns={planetDefenseCooldowns}
+            squadronShips={squadronShips}
             onSelectPlanet={(planetId) => setDrawer({ kind: 'planet', planetId })}
             onSelectPhenomenon={(phenomenonId) => setDrawer({ kind: 'phenomenon', phenomenonId })}
             onArrivedAtPlanetOrbit={handleArrivedAtPlanetOrbit}
@@ -4706,7 +5097,8 @@ export default function App() {
                 spawnCount,
                 enemyTech,
                 campaign.playerPos,
-                mission.targetEnemyName ?? 'Alvo Hostil'
+                mission.targetEnemyName ?? 'Alvo Hostil',
+                { isElite: mission.type === 'combate' || mission.type === 'guerra' }
               ).map((enemy, idx) => ({
                 ...enemy,
                 name:
@@ -5288,6 +5680,7 @@ export default function App() {
                   onExtractGround={handleExtractGround}
                   onRevealExistence={handleRevealExistence}
                   onBombardPlanet={handleBombardPlanet}
+                  bombardCooldownSec={bombardWeaponCooldownSec}
                   onDestroyMovingHazard={(hazardId) => {
                     soundEngine.playExplosion();
                     setCampaign((prev) => {
@@ -5399,10 +5792,12 @@ export default function App() {
                 <ShipAndCrewPanel
                   campaign={campaign}
                   inOrbit={Boolean(campaign.orbitingPlanetId)}
+                  damageItemCooldownSec={damageItemCooldownSec}
                   onClose={() => setDrawer({ kind: 'none' })}
                   onUseConsumable={handleUseConsumable}
                   onEquipFromDepot={handleEquipFromDepot}
                   onUnequip={handleUnequipToCompartment}
+                  onUnequipCrewGear={handleUnequipCrewGear}
                   onSendResourceToVault={(resourceId, qty) => applyVault((state) => sendResourceToVault(state, resourceId, qty))}
                   onSendConsumableToVault={(consumableId, qty) =>
                     applyVault((state) => sendConsumableToVault(state, consumableId, qty))
@@ -5410,6 +5805,9 @@ export default function App() {
                   onSendDepotToVault={(depotUid) => applyVault((state) => sendDepotGearToVault(state, depotUid))}
                   onSendInstalledToVault={(category, itemId, slotIndex) =>
                     applyVault((state) => sendInstalledGearToVault(state, category, itemId, slotIndex))
+                  }
+                  onSendCrewGearToVault={(crewGearUid) =>
+                    applyVault((state) => sendCrewGearToVault(state, crewGearUid))
                   }
                   onEquipFromVault={(gearUid, shipUid) => applyVault((state) => equipVaultGear(state, gearUid, shipUid))}
                   onWithdrawResource={(resourceId, qty) =>
@@ -5525,6 +5923,24 @@ export default function App() {
                     if (res.ok) setCampaign(res.state);
                     notify(res.message);
                   }}
+                  onChooseRank3Mode={(mode) => {
+                    soundEngine.playClick();
+                    const res = chooseRank3WarMode(campaign, mode);
+                    if (res.ok) setCampaign(res.state);
+                    notify(res.message);
+                  }}
+                  onToggleSquadronShip={(shipUid) => {
+                    soundEngine.playClick();
+                    const res = toggleSquadronShip(campaign, shipUid);
+                    if (res.ok) setCampaign(res.state);
+                    notify(res.message);
+                  }}
+                  onConfigureResourceCollection={(shipUids, resourceId) => {
+                    soundEngine.playClick();
+                    const res = configureResourceCollection(campaign, shipUids, resourceId);
+                    if (res.ok) setCampaign(res.state);
+                    notify(res.message);
+                  }}
                   onOrderOffensive={(warId) => {
                     soundEngine.playClick();
                     const res = orderCoordinatedOffensive(campaign, warId);
@@ -5611,6 +6027,7 @@ export default function App() {
                   gameTimeSeconds={campaign.gameTimeSeconds}
                   fleeState={fleeState}
                   fleePreview={fleePreview}
+                  damageItemCooldownSec={damageItemCooldownSec}
                   onUseConsumable={handleUseConsumable}
                   onTriggerAbility={handleTriggerAbility}
                   onStartFlee={handleStartFlee}
@@ -5660,11 +6077,16 @@ export default function App() {
           <GalacticMapViewport
             campaign={campaign}
             currentSystem={currentSystem}
+            depletedDeposits={depletedDeposits}
             onJumpToSystem={handleJumpToSystem}
             onRemoteScanSystem={(target) => {
+              if (target.controllingFactionId !== campaign.chosenFactionId) {
+                notify('O scanner da Patente 4 funciona apenas em sistemas da sua facção.');
+                return;
+              }
               soundEngine.playScan();
               setCampaign((prev) => {
-                if (!prev) return prev;
+                if (!prev || target.controllingFactionId !== prev.chosenFactionId) return prev;
                 const nextScanned = prev.scannedSystemIds.includes(target.id)
                   ? prev.scannedSystemIds
                   : [...prev.scannedSystemIds, target.id];
@@ -5754,6 +6176,7 @@ export default function App() {
           campaign={campaign}
           onStartCombat={() => {
             soundEngine.playAlert();
+            setShowGalacticMap(false);
             if (!pendingEncounter.forcedCombat) {
               setCampaign((prev) =>
                 prev
@@ -5816,7 +6239,11 @@ export default function App() {
 
       {/* VISUAL NOVEL OVERLAY (Opening & Level-2 Contact) */}
       {vnNodes && vnNodes[vnIndex] && (
-        <VisualNovelOverlay node={vnNodes[vnIndex]} onSelectChoice={handleVnChoice} />
+        <VisualNovelOverlay
+          node={vnNodes[vnIndex]}
+          playerGender={campaign.playerGender ?? 'M'}
+          onSelectChoice={handleVnChoice}
+        />
       )}
 
       {/* HULL DESTROYED / ESCAPE POD MODAL (Section 16.2) */}

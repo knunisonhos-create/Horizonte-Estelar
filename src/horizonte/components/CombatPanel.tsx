@@ -11,7 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import type { ActiveEnemy, OwnedShip, WeaponDamageType } from '../types/game';
-import { TECH_SYNERGY_BONUS, type CrewBonuses } from '../engine/combat';
+import { getEnemyCombatShieldRegenPerSec, TECH_SYNERGY_BONUS, type CrewBonuses } from '../engine/combat';
 import { FACTIONS_BY_ID } from '../data/lifeforms';
 import { CONSUMABLES_BY_ID, HULLS_BY_ID } from '../data/items';
 import { SPECIAL_ABILITIES_BY_ID } from '../data/originPerks';
@@ -47,6 +47,7 @@ interface CombatPanelProps {
   gameTimeSeconds: number;
   fleeState: FleeState | null;
   fleePreview: FleePreview;
+  damageItemCooldownSec?: number;
   onUseConsumable: (consumableId: string) => void;
   onTriggerAbility: (abilityId: string) => void;
   onStartFlee: () => void;
@@ -87,6 +88,7 @@ export const CombatPanel: React.FC<CombatPanelProps> = ({
   gameTimeSeconds,
   fleeState,
   fleePreview,
+  damageItemCooldownSec = 0,
   onUseConsumable,
   onTriggerAbility,
   onStartFlee,
@@ -291,6 +293,28 @@ export const CombatPanel: React.FC<CombatPanelProps> = ({
                     </span>
                   </div>
                 </div>
+
+                {(enemy.enhancerLabel || enemy.shieldMitigation || enemy.maxShield > 0) && (
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-amber-200/90 flex-wrap">
+                    <span className="truncate">
+                      {enemy.enhancerLabel ?? `Potencializador Nv ${enemy.techLevel}`}
+                      {typeof enemy.enhancerBonusPct === 'number' && enemy.enhancerBonusPct > 0
+                        ? ` (+${enemy.enhancerBonusPct}%)`
+                        : ''}
+                    </span>
+                    <span className="font-mono-tabular text-slate-300 shrink-0">
+                      {typeof enemy.shieldMitigation === 'number' && enemy.shieldMitigation > 0
+                        ? `Mit. ${Math.round(enemy.shieldMitigation * 100)}%`
+                        : ''}
+                      {typeof enemy.shieldMitigation === 'number' && enemy.shieldMitigation > 0 && enemy.maxShield > 0
+                        ? ' · '
+                        : ''}
+                      {enemy.maxShield > 0
+                        ? `+${getEnemyCombatShieldRegenPerSec(enemy).toFixed(1)}/s esc.`
+                        : ''}
+                    </span>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-0.5">
@@ -535,31 +559,52 @@ export const CombatPanel: React.FC<CombatPanelProps> = ({
                   Consumíveis Exclusivos da Raça
                 </div>
                 <div className="space-y-1.5">
-                  {raceConsumables.map(({ def, qty }) => (
-                    <button
-                      key={def.id}
-                      type="button"
-                      onClick={() => onUseConsumable(def.id)}
-                      className="w-full min-h-[52px] flex items-center gap-2.5 rounded-xl border border-amber-500/50 bg-amber-950/35 hover:bg-amber-900/45 text-white px-3 py-2 text-left transition-colors cursor-pointer"
-                    >
-                      <EquipmentSprite category="consumable" itemId={def.id} size={32} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-1 font-semibold flex-wrap">
-                          <span className="truncate text-amber-200">{def.name}</span>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <TechCategoryBadge
-                              category={def.factionStyle}
-                              activeCategory={bonuses.activeTechCategory}
-                              bonusText="+35%"
-                              compact
-                            />
-                            <span className="font-mono-tabular text-amber-300">×{qty}</span>
+                  {raceConsumables.map(({ def, qty }) => {
+                    const isDamageItem = Boolean(def.combatEffect?.damageAllEnemies);
+                    const onCooldown = isDamageItem && damageItemCooldownSec > 0;
+                    const remSec = Math.ceil(damageItemCooldownSec);
+                    return (
+                      <button
+                        key={def.id}
+                        type="button"
+                        disabled={onCooldown}
+                        onClick={() => onUseConsumable(def.id)}
+                        className={`w-full min-h-[52px] flex items-center gap-2.5 rounded-xl border px-3 py-2 text-left transition-colors ${
+                          onCooldown
+                            ? 'border-slate-800 bg-slate-950/80 text-slate-500 cursor-not-allowed'
+                            : 'border-amber-500/50 bg-amber-950/35 hover:bg-amber-900/45 text-white cursor-pointer'
+                        }`}
+                      >
+                        <EquipmentSprite category="consumable" itemId={def.id} size={32} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1 font-semibold flex-wrap">
+                            <span className={`truncate ${onCooldown ? 'text-slate-400' : 'text-amber-200'}`}>
+                              {def.name}
+                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <TechCategoryBadge
+                                category={def.factionStyle}
+                                activeCategory={bonuses.activeTechCategory}
+                                bonusText="+35%"
+                                compact
+                              />
+                              {onCooldown && (
+                                <span className="px-1.5 py-0.5 rounded border border-rose-500/45 bg-rose-950/60 text-rose-200 text-[10px] font-mono-tabular font-bold">
+                                  Recarga {remSec}s
+                                </span>
+                              )}
+                              <span className="font-mono-tabular text-amber-300">×{qty}</span>
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-slate-300 leading-snug">
+                            {onCooldown
+                              ? `Aguarde ${remSec}s para reutilizar itens de dano em combate.`
+                              : def.description}
                           </div>
                         </div>
-                        <div className="text-[11px] text-slate-300 leading-snug">{def.description}</div>
-                      </div>
-                    </button>
-                  ))}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}

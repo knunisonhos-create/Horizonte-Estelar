@@ -16,7 +16,14 @@ import type {
   PlayerCampaignState,
   ResourceCargoRecord,
 } from '../types/game';
-import { compartmentUsed, computeCrewBonuses, computeShipDerivedStats } from './combat';
+import {
+  compartmentUsed,
+  computeCrewBonuses,
+  computeShipDerivedStats,
+  getCrewItemMaintenancePerCycle,
+  isCrewEquipableItem,
+  isManualExtractor,
+} from './combat';
 
 export const FACTION_VAULT_FEE_PER_ITEM = 5;
 
@@ -123,7 +130,7 @@ function cloneShip(ship: OwnedShip): OwnedShip {
     shieldIds: [...ship.shieldIds],
     extractorIds: [...ship.extractorIds],
     utilityIds: [...ship.utilityIds],
-    suitGearIds: [...ship.suitGearIds],
+    suitGearIds: [...(ship.suitGearIds ?? [])],
     depot: [...ship.depot],
   };
 }
@@ -204,10 +211,19 @@ export function installGearOnShip(
     }
     next.shieldIds.push(item.itemId);
   } else if (item.category === 'extractor') {
-    if (hull.extractionSlots <= 0) {
+    if (isManualExtractor(item.itemId)) {
+      return {
+        ok: false,
+        ship,
+        displaced: [],
+        error: 'Ferramenta de extração manual: equipe diretamente na Tripulação.',
+      };
+    }
+    const maxShipExtractors = Math.min(2, hull.extractionSlots);
+    if (maxShipExtractors <= 0) {
       return { ok: false, ship, displaced: [], error: 'Esta nave não tem encaixe de extrator.' };
     }
-    if (next.extractorIds.length >= hull.extractionSlots) {
+    if (next.extractorIds.length >= maxShipExtractors) {
       const popped = next.extractorIds.shift();
       if (popped) displaced.push(makeRecord('extractor', popped));
     }
@@ -222,10 +238,12 @@ export function installGearOnShip(
     }
     next.utilityIds.push(item.itemId);
   } else if (item.category === 'suit') {
-    if (next.suitGearIds.includes(item.itemId)) {
-      return { ok: false, ship, displaced: [], error: 'Esse traje já está na nave.' };
-    }
-    next.suitGearIds.push(item.itemId);
+    return {
+      ok: false,
+      ship,
+      displaced: [],
+      error: 'Trajes, veículos e tanques são equipados diretamente na Tripulação.',
+    };
   } else {
     return { ok: false, ship, displaced: [], error: 'Essa peça não encaixa em nave nenhuma.' };
   }
@@ -255,9 +273,6 @@ export function detachInstalledGear(
     removed = true;
   } else if (category === 'utility' && next.utilityIds[slotIndex] === itemId) {
     next.utilityIds.splice(slotIndex, 1);
-    removed = true;
-  } else if (category === 'suit' && next.suitGearIds[slotIndex] === itemId) {
-    next.suitGearIds.splice(slotIndex, 1);
     removed = true;
   }
   if (!removed) return null;
@@ -351,6 +366,24 @@ export function sendInstalledGearToVault(
   };
 }
 
+export function sendCrewGearToVault(state: PlayerCampaignState, crewGearUid: string): VaultOp {
+  const list = state.crewEquipment ?? [];
+  const item = list.find((entry) => entry.uid === crewGearUid);
+  if (!item) return fail(state, 'Esse equipamento não está na tripulação.');
+  const vault = normalizeFactionVault(state.factionVault);
+  return {
+    ok: true,
+    message: `${gearName(item.category, item.itemId)} saiu da tripulação e foi para o cofre da facção.`,
+    state: withVault(
+      {
+        ...state,
+        crewEquipment: list.filter((entry) => entry.uid !== crewGearUid),
+      },
+      { ...vault, gear: [...vault.gear, item] }
+    ),
+  };
+}
+
 export function withdrawResourceFromVault(state: PlayerCampaignState, resourceId: string, qty: number): VaultOp {
   const free = freeCompartment(state);
   if (free <= 0) return fail(state, 'O compartimento de carga não tem espaço.');
@@ -421,11 +454,34 @@ export function equipVaultGear(state: PlayerCampaignState, gearUid: string, ship
   const vault = normalizeFactionVault(state.factionVault);
   const item = vault.gear.find((entry) => entry.uid === gearUid);
   if (!item) return fail(state, 'A peça não está no cofre.');
+  const name = gearName(item.category, item.itemId);
+
+  if (isCrewEquipableItem(item.category, item.itemId)) {
+    const maint = getCrewItemMaintenancePerCycle(item.category, item.itemId);
+    const equippedItem: InventoryItemRecord = {
+      ...item,
+      uid: `creweq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    };
+    return {
+      ok: true,
+      message: `${name} equipado na tripulação (+${maint} cr/ciclo de manutenção).`,
+      state: withVault(
+        {
+          ...state,
+          crewEquipment: [...(state.crewEquipment ?? []), equippedItem],
+        },
+        {
+          ...vault,
+          gear: vault.gear.filter((entry) => entry.uid !== gearUid),
+        }
+      ),
+    };
+  }
+
   const ship = state.ships.find((entry) => entry.uid === shipUid);
   if (!ship) return fail(state, 'Escolha uma nave da frota.');
   const installed = installGearOnShip(ship, item);
   if (!installed.ok) return fail(state, installed.error ?? 'Não foi possível equipar.');
-  const name = gearName(item.category, item.itemId);
   const displacedNote =
     installed.displaced.length > 0 ? ' A peça que saiu do encaixe voltou ao cofre.' : '';
   return {

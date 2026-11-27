@@ -6,7 +6,7 @@ import { RESOURCES_BY_ID } from '../data/items';
 import { getRenownTierName } from '../data/narrative';
 import { CreatureCard } from './CreatureCard';
 import { EquipmentSprite, ResourceSprite } from './SpriteArt';
-import { compartmentUsed, computeCrewBonuses, computeShipDerivedStats } from '../engine/combat';
+import { compartmentUsed, computeCrewBonuses, computeShipDerivedStats, getEnemyCombatShieldRegenPerSec } from '../engine/combat';
 import { encounterGearTablePrice } from '../engine/encounters';
 import { formatTablePct, tableDeltaPct } from '../engine/market';
 import { neededResourceIds } from '../engine/resourceNeeds';
@@ -34,16 +34,26 @@ const GEAR_PLACE: Record<EncounterGearCategory, string> = {
   jumpDrive: 'Motor de salto',
   extractor: 'Extrator instalado',
   utility: 'Utilidade instalada',
-  suit: 'Traje instalado',
+  suit: 'Equipado na tripulação',
 };
 
-function gearStillInstalled(ship: OwnedShip | undefined, offer: Extract<EncounterSellOffer, { kind: 'instalado' }>): boolean {
+function gearStillInstalled(
+  ship: OwnedShip | undefined,
+  campaign: PlayerCampaignState,
+  offer: Extract<EncounterSellOffer, { kind: 'instalado' }>
+): boolean {
+  if (offer.source === 'crew' || offer.category === 'suit') {
+    const list = campaign.crewEquipment ?? [];
+    if (offer.crewUid) {
+      return list.some((entry) => entry.uid === offer.crewUid && entry.itemId === offer.itemId);
+    }
+    return list[offer.slotIndex]?.itemId === offer.itemId;
+  }
   if (!ship) return false;
   if (offer.category === 'weapon') return ship.weaponId === offer.itemId;
   if (offer.category === 'shield') return ship.shieldIds[offer.slotIndex] === offer.itemId;
   if (offer.category === 'extractor') return ship.extractorIds[offer.slotIndex] === offer.itemId;
   if (offer.category === 'utility') return ship.utilityIds[offer.slotIndex] === offer.itemId;
-  if (offer.category === 'suit') return ship.suitGearIds[offer.slotIndex] === offer.itemId;
   return false;
 }
 
@@ -54,7 +64,14 @@ interface EncounterModalProps {
   onPassPeacefully: () => void;
   onBuyResource: (resourceId: string, qty: number, totalCost: number) => void;
   onSellResource: (resourceId: string, qty: number, unitPrice: number) => void;
-  onSellInstalled: (category: EncounterGearCategory, itemId: string, slotIndex: number, price: number) => void;
+  onSellInstalled: (
+    category: EncounterGearCategory,
+    itemId: string,
+    slotIndex: number,
+    price: number,
+    source?: 'ship' | 'crew',
+    crewUid?: string
+  ) => void;
   onAcceptMission: () => void;
 }
 
@@ -174,7 +191,9 @@ export const EncounterModal: React.FC<EncounterModalProps> = ({
                   key={e.id}
                   className="font-mono-tabular bg-slate-900 border border-slate-800 rounded-md px-2 py-0.5"
                 >
-                  {e.name} (Nv {e.techLevel}): Casco {Math.round(e.hull)} / Esc. {Math.round(e.shield)} · {DAMAGE_TYPE_LABELS[e.damageType]}
+                  {e.name} (Nv {e.techLevel} · {e.combatScore} pts): Casco {Math.round(e.hull)} / Esc. {Math.round(e.shield)}
+                  {e.maxShield > 0 ? ` (+${getEnemyCombatShieldRegenPerSec(e).toFixed(1)}/s)` : ''} · {DAMAGE_TYPE_LABELS[e.damageType]}
+                  {typeof e.enhancerBonusPct === 'number' && e.enhancerBonusPct > 0 ? ` · +${e.enhancerBonusPct}% Bônus` : ''}
                 </span>
               ))}
             </div>
@@ -337,7 +356,7 @@ export const EncounterModal: React.FC<EncounterModalProps> = ({
                           const rStyle = RARITY_STYLES[meta.rarity] ?? RARITY_STYLES.comum;
                           const table = encounterGearTablePrice(offer.category, offer.itemId);
                           const diffPct = table > 0 ? tableDeltaPct(offer.price, table) : 0;
-                          const present = gearStillInstalled(activeShip, offer);
+                          const present = gearStillInstalled(activeShip, campaign, offer);
                           return (
                             <div
                               key={`gear-${offer.category}-${offer.slotIndex}-${offer.itemId}`}
@@ -348,7 +367,7 @@ export const EncounterModal: React.FC<EncounterModalProps> = ({
                                 <div className="min-w-0 flex-1">
                                   <div className={`font-semibold text-[11px] truncate ${rStyle.text}`}>{meta.name}</div>
                                   <div className="text-[10px] text-slate-400 font-mono-tabular">
-                                    {GEAR_PLACE[offer.category]} ·{' '}
+                                    {offer.source === 'crew' ? 'Equipado na tripulação' : GEAR_PLACE[offer.category]} ·{' '}
                                     <span className="text-emerald-400">{formatTablePct(diffPct)}</span>
                                   </div>
                                 </div>
@@ -356,7 +375,16 @@ export const EncounterModal: React.FC<EncounterModalProps> = ({
                               {present ? (
                                 <button
                                   type="button"
-                                  onClick={() => onSellInstalled(offer.category, offer.itemId, offer.slotIndex, offer.price)}
+                                  onClick={() =>
+                                    onSellInstalled(
+                                      offer.category,
+                                      offer.itemId,
+                                      offer.slotIndex,
+                                      offer.price,
+                                      offer.source,
+                                      offer.crewUid
+                                    )
+                                  }
                                   className="py-1 px-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[10px] font-semibold cursor-pointer"
                                 >
                                   Vender por {offer.price} créditos

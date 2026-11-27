@@ -11,7 +11,7 @@ import type {
   SystemPhenomenon,
   WeaponDamageType,
 } from '../types/game';
-import { FACTIONS_BY_ID } from '../data/lifeforms';
+import { FACTIONS_BY_ID, SPECIES_BY_ID } from '../data/lifeforms';
 import { HULLS_BY_ID, WEAPONS_BY_ID } from '../data/items';
 import { createRadialGlowTexture, getDestroyedPlanetTexture, getPlanetTexture } from '../engine/proceduralTextures';
 import {
@@ -21,6 +21,12 @@ import {
   getShipVariantForHull,
   hashShipVariant,
 } from '../engine/shipModels3D';
+import {
+  applyDamageToEnemy,
+  getEnemyCombatShieldRegenPerSec,
+  TECH_SYNERGY_BONUS,
+} from '../engine/combat';
+import { computeCharacterModifiers } from '../engine/character';
 import { soundEngine } from '../engine/audio';
 import { canvasPixelRatio } from '../utils/mobileLandscape';
 
@@ -36,6 +42,8 @@ export interface SolarSystemViewportProps {
   travelTargetPhenomenonId: string | null;
   miningTargetId: string | null;
   landingPulse?: { planetId: string; nonce: number } | null;
+  bombardPulse?: { planetId: string; nonce: number } | null;
+  combatBlastPulse?: { nonce: number; damageAll: number; stripShieldPct: number; label?: string } | null;
   dockedPlanetId?: string | null;
   activeEnemies: ActiveEnemy[];
   isFleeing?: boolean;
@@ -48,6 +56,16 @@ export interface SolarSystemViewportProps {
     planetId: string;
   } | null;
   defenseCombatBonusPct?: number;
+  planetDefenseCooldowns?: Record<string, number>;
+  squadronShips?: Array<{
+    uid: string;
+    hullId: string;
+    factionId?: string;
+    color?: string;
+    weaponId?: string | null;
+    techLevel: number;
+    customName: string;
+  }>;
   onSelectPlanet: (planetId: string) => void;
   onSelectPhenomenon: (phenId: string) => void;
   onArrivedAtPlanetOrbit: (planetId: string) => void;
@@ -417,8 +435,11 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
     landingProgress: number;
     landingHoldTimer: number;
     lastLandingNonce: number;
+    lastBombardNonce: number;
+    lastCombatBlastNonce: number;
     fleeWaypoints: TangentPoint[];
     fleeIndex: number;
+    prevEnemyCount: number;
   }>({
     shipPos: new THREE.Vector3(props.campaign.playerPos.x, 0, props.campaign.playerPos.z),
     shipRotY: 0,
@@ -447,8 +468,11 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
     landingProgress: 0,
     landingHoldTimer: 0,
     lastLandingNonce: 0,
+    lastBombardNonce: 0,
+    lastCombatBlastNonce: props.combatBlastPulse?.nonce ?? 0,
     fleeWaypoints: [],
     fleeIndex: 0,
+    prevEnemyCount: props.activeEnemies.length,
   });
 
   // Sync incoming system changes & explicit planet/phenomenon travel buttons
@@ -607,7 +631,22 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
     const sysGroup = new THREE.Group();
     scene.add(sysGroup);
 
-    const planetMeshes = new Map<string, { group: THREE.Group; sphere: THREE.Mesh; data: PlanetData; isDestroyed: boolean }>();
+    const planetMeshes = new Map<
+      string,
+      {
+        group: THREE.Group;
+        sphere: THREE.Mesh;
+        data: PlanetData;
+        isDestroyed: boolean;
+        defenseBadge: {
+          sprite: THREE.Sprite;
+          canvas: HTMLCanvasElement;
+          ctx: CanvasRenderingContext2D;
+          tex: THREE.CanvasTexture;
+          lastSec: number;
+        };
+      }
+    >();
     const phenomenonMeshes = new Map<string, { group: THREE.Group; data: SystemPhenomenon }>();
     const clickableMeshes: THREE.Object3D[] = [];
     const enemyMeshes = new Map<string, THREE.Group>();
@@ -641,6 +680,24 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
       }
       defenseEscorts.length = 0;
     };
+    const squadronMeshes = new Map<
+      string,
+      {
+        mesh: THREE.Group;
+        visualKey: string;
+        pos: THREE.Vector3;
+        fireCooldown: number;
+        techLevel: number;
+        color: string;
+      }
+    >();
+    const clearSquadronMeshes = () => {
+      squadronMeshes.forEach((sq) => {
+        scene.remove(sq.mesh);
+        disposeObject3D(sq.mesh);
+      });
+      squadronMeshes.clear();
+    };
     const rogueAsteroids: Array<{
       mesh: THREE.Group;
       orbitRadius: number;
@@ -656,6 +713,14 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
 
     // Projectile / beam / cataclysm transient VFX pool
     const vfxList: Array<{ mesh: THREE.Object3D; age: number; maxAge: number; vel?: THREE.Vector3; growRate?: number }> = [];
+    const bombardBursts: Array<{
+      planetId: string;
+      delay: number;
+      offsetDir: THREE.Vector3;
+      scale: number;
+      isMedium: boolean;
+      playAudio: boolean;
+    }> = [];
 
     // Player Ship Composite 3D Group (rebuilt dynamically when active ship/faction color/rarity changes)
     const initShip =
@@ -745,6 +810,10 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
       while (sysGroup.children.length > 0) {
         sysGroup.remove(sysGroup.children[0]);
       }
+      planetMeshes.forEach((pm) => {
+        pm.defenseBadge.tex.dispose();
+        (pm.defenseBadge.sprite.material as THREE.SpriteMaterial).dispose();
+      });
       planetMeshes.clear();
       phenomenonMeshes.clear();
       clickableMeshes.length = 0;
@@ -752,6 +821,7 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
       clearDefenseEscorts();
       activeDefenseNonce = -1;
       rogueAsteroids.length = 0;
+      bombardBursts.length = 0;
       devastatedPlanetIds.clear();
       sceneAge = 0;
       missionTargetMesh = null;
@@ -950,8 +1020,40 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         const a = p.orbitPhase + t * p.orbitSpeed;
         pGroup.position.set(Math.cos(a) * p.orbitRadius, 0, Math.sin(a) * p.orbitRadius * (1 - ecc));
 
+        // 60s Defense Re-send Cooldown Badge floating directly above the planet
+        const badgeCanvas = document.createElement('canvas');
+        badgeCanvas.width = 256;
+        badgeCanvas.height = 76;
+        const badgeCtx = badgeCanvas.getContext('2d')!;
+        const badgeTex = new THREE.CanvasTexture(badgeCanvas);
+        badgeTex.minFilter = THREE.LinearFilter;
+        badgeTex.magFilter = THREE.LinearFilter;
+        const badgeMat = new THREE.SpriteMaterial({
+          map: badgeTex,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+        });
+        const badgeSprite = new THREE.Sprite(badgeMat);
+        badgeSprite.position.set(0, p.radius + 2.4, 0);
+        badgeSprite.renderOrder = 25;
+        badgeSprite.visible = false;
+        pGroup.add(badgeSprite);
+
         sysGroup.add(pGroup);
-        planetMeshes.set(p.id, { group: pGroup, sphere, data: p, isDestroyed });
+        planetMeshes.set(p.id, {
+          group: pGroup,
+          sphere,
+          data: p,
+          isDestroyed,
+          defenseBadge: {
+            sprite: badgeSprite,
+            canvas: badgeCanvas,
+            ctx: badgeCtx,
+            tex: badgeTex,
+            lastSec: -1,
+          },
+        });
       });
 
       // 6. System Phenomena (Nebula pocket, Errant Comet, Meteor Field, Shipwreck, Black Hole)
@@ -1469,6 +1571,111 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         rebuildSystemScene(p.system);
       }
 
+      if (p.bombardPulse && p.bombardPulse.nonce !== sim.lastBombardNonce) {
+        sim.lastBombardNonce = p.bombardPulse.nonce;
+        const targetPm = planetMeshes.get(p.bombardPulse.planetId);
+        if (targetPm) {
+          const rad = Math.max(0.9, targetPm.data.radius);
+          // 14 staggered small-to-medium explosions across the planet surface
+          for (let i = 0; i < 14; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const offsetDir = new THREE.Vector3(
+              Math.sin(phi) * Math.cos(theta),
+              Math.abs(Math.cos(phi)) * 0.78 + 0.12,
+              Math.sin(phi) * Math.sin(theta)
+            ).normalize();
+            const isMedium = i % 3 === 1;
+            const scale = isMedium
+              ? rad * (0.28 + Math.random() * 0.14)
+              : rad * (0.14 + Math.random() * 0.1);
+            bombardBursts.push({
+              planetId: p.bombardPulse.planetId,
+              delay: i * 0.12 + Math.random() * 0.06,
+              offsetDir,
+              scale,
+              isMedium,
+              playAudio: i === 0 || i % 3 === 0,
+            });
+          }
+
+          // Launch 3 orbital bombardment salvo beams from player ship to planet
+          for (let sIdx = 0; sIdx < 3; sIdx++) {
+            const jitter = new THREE.Vector3(
+              (Math.random() - 0.5) * rad * 0.65,
+              (Math.random() - 0.2) * rad * 0.45,
+              (Math.random() - 0.5) * rad * 0.65
+            );
+            const endPt = targetPm.group.position.clone().add(jitter);
+            const dir = endPt.clone().sub(sim.shipPos);
+            const len = Math.max(0.5, dir.length());
+            const beam = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.11, 0.18, len, 6),
+              new THREE.MeshBasicMaterial({
+                color: sIdx === 1 ? '#fde047' : '#f97316',
+                transparent: true,
+                opacity: 0.92,
+              } as any)
+            );
+            beam.position.copy(sim.shipPos).add(endPt).multiplyScalar(0.5);
+            beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+            scene.add(beam);
+            vfxList.push({ mesh: beam, age: -sIdx * 0.08, maxAge: 0.28 });
+          }
+        }
+      }
+
+      for (let bi = bombardBursts.length - 1; bi >= 0; bi--) {
+        const b = bombardBursts[bi];
+        b.delay -= rawDelta;
+        if (b.delay <= 0) {
+          const pm = planetMeshes.get(b.planetId);
+          if (pm) {
+            const localPos = b.offsetDir.clone().multiplyScalar(pm.data.radius * 1.04);
+            const fireball = new THREE.Mesh(
+              new THREE.SphereGeometry(b.scale, 12, 12),
+              new THREE.MeshBasicMaterial({
+                color: b.isMedium ? '#f97316' : '#fde047',
+                transparent: true,
+                opacity: 0.9,
+              } as any)
+            );
+            fireball.position.copy(localPos);
+            pm.group.add(fireball);
+            vfxList.push({
+              mesh: fireball,
+              age: 0,
+              maxAge: b.isMedium ? 0.65 : 0.45,
+              growRate: b.isMedium ? 2.5 : 1.9,
+            });
+
+            const ring = new THREE.Mesh(
+              new THREE.RingGeometry(b.scale * 0.45, b.scale * 0.95, 20),
+              new THREE.MeshBasicMaterial({
+                color: b.isMedium ? '#ef4444' : '#fb923c',
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.92,
+              } as any)
+            );
+            ring.position.copy(localPos);
+            ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), b.offsetDir);
+            pm.group.add(ring);
+            vfxList.push({
+              mesh: ring,
+              age: 0,
+              maxAge: b.isMedium ? 0.7 : 0.5,
+              growRate: b.isMedium ? 3.4 : 2.5,
+            });
+
+            if (b.playAudio) {
+              soundEngine.playExplosion();
+            }
+          }
+          bombardBursts.splice(bi, 1);
+        }
+      }
+
       // Smoothly advance orbital simulation time every frame (eliminates 250ms React interval stutter)
       sim.simTime += dt;
       const timeDiff = p.campaign.gameTimeSeconds - sim.simTime;
@@ -1534,6 +1741,48 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         const ovLevel = p.campaign.planetOverrides[data.id]?.level;
         if (ovLevel === -1 && !pm.isDestroyed) {
           convertPlanetToDestroyedMesh(pm);
+        }
+
+        // Update 60s planetary defense re-send countdown badge above planet
+        const defCd = p.planetDefenseCooldowns?.[data.id] ?? 0;
+        const badge = pm.defenseBadge;
+        if (defCd > 0 && !pm.isDestroyed) {
+          const sec = Math.ceil(defCd);
+          badge.sprite.visible = true;
+          if (sec !== badge.lastSec) {
+            badge.lastSec = sec;
+            const ctx2d = badge.ctx;
+            const cw = badge.canvas.width;
+            const ch = badge.canvas.height;
+            ctx2d.clearRect(0, 0, cw, ch);
+
+            ctx2d.fillStyle = 'rgba(24, 9, 18, 0.92)';
+            ctx2d.strokeStyle = '#fb7185';
+            ctx2d.lineWidth = 4;
+            ctx2d.beginPath();
+            ctx2d.roundRect(6, 6, cw - 12, ch - 12, 14);
+            ctx2d.fill();
+            ctx2d.stroke();
+
+            ctx2d.textAlign = 'center';
+            ctx2d.textBaseline = 'middle';
+            ctx2d.fillStyle = '#fda4af';
+            ctx2d.font = '700 18px ui-sans-serif, system-ui, sans-serif';
+            ctx2d.fillText('REFORÇO EM', cw / 2, 24);
+
+            ctx2d.fillStyle = '#fef08a';
+            ctx2d.font = '800 30px ui-monospace, SFMono-Regular, monospace';
+            ctx2d.fillText(`${sec}s`, cw / 2, 51);
+
+            badge.tex.needsUpdate = true;
+          }
+          const camDist = camera.position.distanceTo(group.position);
+          const badgeH = Math.max(2.2, Math.min(7.5, camDist * 0.055));
+          const badgeW = badgeH * (256 / 76);
+          badge.sprite.position.set(0, data.radius + Math.max(1.8, badgeH * 0.85), 0);
+          badge.sprite.scale.set(badgeW, badgeH, 1);
+        } else {
+          badge.sprite.visible = false;
         }
 
         obstaclePool.push({
@@ -1749,6 +1998,35 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         }
       }
 
+      if (p.combatBlastPulse && p.combatBlastPulse.nonce !== sim.lastCombatBlastNonce) {
+        sim.lastCombatBlastNonce = p.combatBlastPulse.nonce;
+        const { damageAll, stripShieldPct } = p.combatBlastPulse;
+        if ((damageAll > 0 || stripShieldPct > 0) && sim.liveEnemies.size > 0) {
+          sim.liveEnemies.forEach((e) => {
+            let sh = Math.max(0, e.shield * (1 - Math.max(0, Math.min(0.95, stripShieldPct))));
+            let hl = e.hull;
+            if (damageAll > 0) {
+              const absorbed = Math.min(sh, damageAll);
+              sh -= absorbed;
+              hl -= damageAll - absorbed;
+            }
+            e.shield = sh;
+            e.hull = hl;
+            const endPos = new THREE.Vector3(e.x, 0, e.z);
+            spawnShotVfx(sim.shipPos.clone(), endPos, 'plasma', '#f97316');
+            const blastBurst = new THREE.Mesh(
+              new THREE.SphereGeometry(0.95, 10, 10),
+              new THREE.MeshBasicMaterial({ color: '#fb923c', transparent: true, opacity: 0.9 } as any)
+            );
+            blastBurst.position.copy(endPos);
+            scene.add(blastBurst);
+            vfxList.push({ mesh: blastBurst, age: 0, maxAge: 0.45, growRate: 3.4 });
+          });
+          sim.combatDirty = true;
+          sim.combatSyncTimer = 999;
+        }
+      }
+
       enemyMeshes.forEach((mesh, id) => {
         if (!sim.liveEnemies.has(id)) {
           scene.remove(mesh);
@@ -1831,8 +2109,10 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
         }
       }
 
-      // Break planet orbit lock when under active combat so player maneuvers and pursues dynamically
-      if (enemyUpdates.length > 0 && sim.orbitingPlanetId && !sim.travelPlanetId) {
+      // Break planet orbit lock only when new combat enemies launch so player can return to orbit a planet during its 60s window
+      const combatJustEscalated = enemyUpdates.length > sim.prevEnemyCount;
+      sim.prevEnemyCount = enemyUpdates.length;
+      if (combatJustEscalated && sim.orbitingPlanetId && !sim.travelPlanetId) {
         sim.orbitingPlanetId = null;
       }
 
@@ -2202,15 +2482,21 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
             const shotInterval = 1 / fireRate;
             sim.playerFireCooldown = shotInterval;
             const defenseMult = p.planetaryDefenseActive?.active ? 1 + (p.defenseCombatBonusPct ?? 0) / 100 : 1;
-            const shotDps = (weapon?.dps ?? 8) * (p.campaign.originBonuses?.combatDpsMult ?? 1) * defenseMult;
+            const squadronBonusPct = (p.squadronShips ?? []).reduce((sum, sq) => sum + sq.techLevel, 0);
+            const squadronMult = 1 + squadronBonusPct / 100;
+            const activeTechCat = SPECIES_BY_ID[p.campaign.chosenSpeciesId]?.techCategory ?? 'mercantil';
+            const weaponSynergyMult =
+              weapon && weapon.factionStyle === activeTechCat ? 1 + TECH_SYNERGY_BONUS.weaponDpsPct : 1;
+            const charDpsMult = computeCharacterModifiers(p.campaign.character).dpsMult;
+            const shotDps =
+              (weapon?.dps ?? 8) *
+              weaponSynergyMult *
+              (p.campaign.originBonuses?.combatDpsMult ?? 1) *
+              charDpsMult *
+              defenseMult *
+              squadronMult;
             const dmg = shotDps * shotInterval;
-            if (lowestEnemy.shield > 0) {
-              const absorbed = Math.min(lowestEnemy.shield, dmg);
-              lowestEnemy.shield -= absorbed;
-              lowestEnemy.hull -= dmg - absorbed;
-            } else {
-              lowestEnemy.hull -= dmg;
-            }
+            applyDamageToEnemy(lowestEnemy, dmg);
             sim.combatDirty = true;
             soundEngine.playWeapon(weapon?.damageType ?? 'laser');
             spawnShotVfx(
@@ -2300,14 +2586,8 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
             npc.mesh.position.copy(npc.pos);
             npc.mesh.lookAt(targetEnemy.x, 0, targetEnemy.z);
             if (nd <= 24 && Math.random() < dt * 1.8) {
-              const allyDmg = 10;
-              if (targetEnemy.shield > 0) {
-                const abs = Math.min(targetEnemy.shield, allyDmg);
-                targetEnemy.shield -= abs;
-                targetEnemy.hull -= allyDmg - abs;
-              } else {
-                targetEnemy.hull -= allyDmg;
-              }
+              const allyDmg = 12 + p.system.techLevel * 4;
+              applyDamageToEnemy(targetEnemy, allyDmg);
               sim.combatDirty = true;
               spawnShotVfx(
                 npc.pos.clone(),
@@ -2319,8 +2599,9 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
           }
         }
 
-        // Enemies shoot at player & check kills
+        // Enemies regenerate shield gradually (like player), shoot at player, & check kills
         const frameKilled: string[] = [];
+        let anyEnemyRegened = false;
         for (const e of enemyUpdates) {
           if (e.hull <= 0) {
             frameKilled.push(e.id);
@@ -2328,6 +2609,13 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
             sim.liveEnemies.delete(e.id);
             soundEngine.playExplosion();
             continue;
+          }
+          if (e.maxShield > 0 && e.shield < e.maxShield) {
+            const regenGain = getEnemyCombatShieldRegenPerSec(e) * dt;
+            if (regenGain > 0) {
+              e.shield = Math.min(e.maxShield, e.shield + regenGain);
+              anyEnemyRegened = true;
+            }
           }
           const cd = (sim.enemyFireCooldowns[e.id] ?? 0.5) - dt;
           const dist = Math.hypot(e.x - sim.shipPos.x, e.z - sim.shipPos.z);
@@ -2340,8 +2628,12 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
             sim.enemyFireCooldowns[e.id] = cd;
           }
         }
+        if (anyEnemyRegened) {
+          sim.combatDirty = true;
+        }
 
-        if (frameKilled.length > 0 || (sim.combatDirty && sim.combatSyncTimer >= 0.09)) {
+        const syncInterval = sim.accPlayerDmg > 0 || frameKilled.length > 0 ? 0.09 : 0.22;
+        if (frameKilled.length > 0 || (sim.combatDirty && sim.combatSyncTimer >= syncInterval)) {
           const survivors = Array.from(sim.liveEnemies.values()).filter((e) => e.hull > 0);
           const dmgToSend = sim.accPlayerDmg;
           const refToSend = sim.accReflectedDmg;
@@ -2440,14 +2732,8 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
             const distTarget = Math.hypot(targetEnemy.x - esc.pos.x, targetEnemy.z - esc.pos.z);
             if (esc.fireCooldown <= 0 && distTarget <= 26) {
               esc.fireCooldown = 0.85;
-              const allyDmg = 9 + Math.round((p.defenseCombatBonusPct ?? 10) * 0.25);
-              if (targetEnemy.shield > 0) {
-                const abs = Math.min(targetEnemy.shield, allyDmg);
-                targetEnemy.shield -= abs;
-                targetEnemy.hull -= allyDmg - abs;
-              } else {
-                targetEnemy.hull -= allyDmg;
-              }
+              const allyDmg = 10 + Math.round((p.defenseCombatBonusPct ?? 10) * 0.45) + p.system.techLevel * 4;
+              applyDamageToEnemy(targetEnemy, allyDmg);
               sim.combatDirty = true;
               const defColor = FACTIONS_BY_ID[p.planetaryDefenseActive?.factionId ?? '']?.color ?? '#38bdf8';
               spawnShotVfx(esc.pos.clone(), new THREE.Vector3(targetEnemy.x, 0, targetEnemy.z), 'laser', defColor);
@@ -2457,6 +2743,103 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
           }
         }
       }
+
+      // Rank 3 Linked Squadron Ships (max 3 reserve ships following player everywhere and assisting in combat)
+      const desiredSquadron = (p.squadronShips ?? []).slice(0, 3);
+      const desiredSqIds = new Set(desiredSquadron.map((s) => s.uid));
+      squadronMeshes.forEach((entry, uid) => {
+        if (!desiredSqIds.has(uid)) {
+          scene.remove(entry.mesh);
+          disposeObject3D(entry.mesh);
+          squadronMeshes.delete(uid);
+        }
+      });
+
+      const formationOffsets: Array<[number, number]> = [
+        [-3.6, -3.2],
+        [3.6, -3.2],
+        [0, -5.2],
+      ];
+      const cosR = Math.cos(sim.shipRotY);
+      const sinR = Math.sin(sim.shipRotY);
+      const sqCombatTarget = enemyUpdates.find((e) => e.hull > 0) ?? null;
+
+      desiredSquadron.forEach((sqDef, idx) => {
+        const sHull = HULLS_BY_ID[sqDef.hullId];
+        const sFac = FACTIONS_BY_ID[sqDef.factionId ?? p.campaign.chosenFactionId];
+        const sColor = sqDef.color ?? sFac?.color ?? sHull?.color ?? '#38bdf8';
+        const sRarity = sHull?.rarity ?? 'comum';
+        const sVariant = getShipVariantForHull(sHull?.id, sHull?.hullShape);
+        const visualKey = `${sqDef.uid}_${sqDef.hullId}_${sColor}_${sRarity}_${sVariant}`;
+
+        let entry = squadronMeshes.get(sqDef.uid);
+        if (!entry || entry.visualKey !== visualKey) {
+          if (entry) {
+            scene.remove(entry.mesh);
+            disposeObject3D(entry.mesh);
+          }
+          const [ox, oz] = formationOffsets[idx % formationOffsets.length];
+          const initPos = new THREE.Vector3(
+            sim.shipPos.x + ox * cosR + oz * sinR,
+            0,
+            sim.shipPos.z - ox * sinR + oz * cosR
+          );
+          const mesh = buildShipModel3D({
+            primaryColor: sColor,
+            rarity: sRarity,
+            variant: sVariant,
+            scale: 0.92,
+          });
+          mesh.position.copy(initPos);
+          scene.add(mesh);
+          entry = {
+            mesh,
+            visualKey,
+            pos: initPos,
+            fireCooldown: 0.35 + idx * 0.25,
+            techLevel: sqDef.techLevel,
+            color: sColor,
+          };
+          squadronMeshes.set(sqDef.uid, entry);
+        } else {
+          entry.techLevel = sqDef.techLevel;
+        }
+
+        const [ox, oz] = formationOffsets[idx % formationOffsets.length];
+        const goalX = sim.shipPos.x + ox * cosR + oz * sinR;
+        const goalZ = sim.shipPos.z - ox * sinR + oz * cosR;
+        _vec.set(goalX - entry.pos.x, 0, goalZ - entry.pos.z);
+        const distGoal = _vec.length();
+        if (distGoal > 42) {
+          entry.pos.set(goalX, 0, goalZ);
+        } else if (distGoal > 0.08) {
+          _vec.normalize();
+          const followSpeed = Math.max(moveSpeed * 1.18, distGoal * 3.4);
+          entry.pos.addScaledVector(_vec, Math.min(distGoal, followSpeed * Math.max(dt, rawDelta * 0.65)));
+        }
+        entry.mesh.position.copy(entry.pos);
+
+        if (sqCombatTarget && !p.isFleeing) {
+          entry.mesh.lookAt(sqCombatTarget.x, 0, sqCombatTarget.z);
+          entry.fireCooldown -= dt;
+          const distEnemy = Math.hypot(sqCombatTarget.x - entry.pos.x, sqCombatTarget.z - entry.pos.z);
+          if (entry.fireCooldown <= 0 && distEnemy <= 28) {
+            entry.fireCooldown = 0.95;
+            const sqWeapon = sqDef.weaponId ? WEAPONS_BY_ID[sqDef.weaponId] : null;
+            const sqDmg = 6 + sqDef.techLevel * 4 + (sqWeapon ? sqWeapon.dps * 0.15 : 0);
+            applyDamageToEnemy(sqCombatTarget, sqDmg);
+            sim.combatDirty = true;
+            spawnShotVfx(
+              entry.pos.clone(),
+              new THREE.Vector3(sqCombatTarget.x, 0, sqCombatTarget.z),
+              sqWeapon?.damageType ?? 'laser',
+              sqWeapon?.color ?? entry.color
+            );
+          }
+        } else {
+          entry.mesh.rotation.y = sim.shipRotY;
+        }
+      });
 
       // Naves de passagem: saem pequenas de um mundo, cruzam o sistema e encolhem ao entrar no destino.
       const livingDestinations = (exceptId: string) =>
@@ -2724,6 +3107,11 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
       for (let i = vfxList.length - 1; i >= 0; i--) {
         const v = vfxList[i];
         v.age += rawDelta;
+        if (v.age < 0) {
+          v.mesh.visible = false;
+          continue;
+        }
+        v.mesh.visible = true;
         if (v.vel) v.mesh.position.addScaledVector(v.vel, rawDelta);
         if (v.growRate) {
           const sc = 1 + (v.age / v.maxAge) * v.growRate;
@@ -2734,7 +3122,7 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
           }
         }
         if (v.age >= v.maxAge) {
-          scene.remove(v.mesh);
+          (v.mesh.parent ?? scene).remove(v.mesh);
           vfxList.splice(i, 1);
         }
       }
@@ -2798,6 +3186,12 @@ export const SolarSystemViewport: React.FC<SolarSystemViewportProps> = (props) =
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored);
       disposeObject3D(playerShipGroup);
       clearDefenseEscorts();
+      clearSquadronMeshes();
+      planetMeshes.forEach((pm) => {
+        pm.defenseBadge.tex.dispose();
+        (pm.defenseBadge.sprite.material as THREE.SpriteMaterial).dispose();
+      });
+      planetMeshes.clear();
       enemyMeshes.forEach((em) => disposeObject3D(em));
       envTexture.dispose();
       controls.dispose();

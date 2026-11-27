@@ -464,6 +464,84 @@ function buildKnownGalaxy(): StarSystemSummary[] {
     wildAdded++;
   }
 
+  // +65 sistemas selvagens adicionais posicionados ENTRE os sistemas de facção (fronteiras internas)
+  const midWildRng = new SeededRNG(884200);
+  const borderMidpoints: Array<{ x: number; y: number; z: number }> = [];
+  for (let i = 0; i < FACTIONS.length; i++) {
+    for (let j = i + 1; j < FACTIONS.length; j++) {
+      const a = FACTIONS[i].capitalCoord;
+      const b = FACTIONS[j].capitalCoord;
+      const d = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+      if (d >= 12 && d <= 56) {
+        borderMidpoints.push({
+          x: (a.x + b.x) * 0.5,
+          y: (a.y + b.y) * 0.5,
+          z: (a.z + b.z) * 0.5,
+        });
+      }
+    }
+  }
+  const shuffledMidpoints = midWildRng.shuffle(borderMidpoints);
+  let wildMidAdded = 0;
+  let wildMidSafety = 0;
+  while (wildMidAdded < 65 && wildMidSafety < 14000) {
+    wildMidSafety++;
+    const minSpacing = wildMidSafety > 8000 ? 1.8 : wildMidSafety > 4000 ? 2.2 : 2.7;
+    let x: number;
+    let y: number;
+    let z: number;
+    if (wildMidSafety <= shuffledMidpoints.length * 4) {
+      const mid = shuffledMidpoints[(wildMidSafety - 1) % shuffledMidpoints.length];
+      x = Math.round((mid.x + midWildRng.range(-5.5, 5.5)) * 10) / 10;
+      y = Math.round((mid.y + midWildRng.range(-4.5, 4.5)) * 10) / 10;
+      z = Math.round((mid.z + midWildRng.range(-5.5, 5.5)) * 10) / 10;
+    } else {
+      const ang = midWildRng.range(0, Math.PI * 2);
+      const rad = midWildRng.range(10, 96);
+      x = Math.round(Math.cos(ang) * rad * 10) / 10;
+      z = Math.round(Math.sin(ang) * rad * 10) / 10;
+      y = Math.round(midWildRng.range(-15, 15) * 10) / 10;
+    }
+
+    const distCenter = Math.hypot(x, y, z);
+    if (distCenter < 8 || distCenter > 97) continue;
+    if (systems.some((s) => Math.hypot(s.x - x, s.y - y, s.z - z) < minSpacing)) continue;
+
+    const seed = hashCoords(x, y, z, 91000 + wildMidAdded);
+    const sysRng = new SeededRNG(seed);
+    const star = pickStarType(sysRng);
+    const neb = findNebulaAt(x, y, z);
+    const nearBH = blackHoleCoords.some((bh) => Math.hypot(x - bh.x, y - bh.y, z - bh.z) < 12);
+
+    systems.push({
+      id: `sys_wild_mid_${wildMidAdded}`,
+      seed,
+      name: `${makeSystemName(sysRng)} (Fronteira Selvagem)`,
+      x,
+      y,
+      z,
+      starType: star.type,
+      starColor: star.color,
+      starRadius: star.radius * 0.94,
+      starExclusionRadius: star.radius + 6,
+      isBlackHole: false,
+      isSupermassive: false,
+      inNebula: Boolean(neb),
+      nebulaColor: neb?.color,
+      region: determineRegion(x, y, z, Boolean(neb), nearBH),
+      controllingFactionId: null,
+      isCapital: false,
+      conflictLevel: 1,
+      hostileChancePct: 14,
+      nearestHostileDistLy: 28,
+      techLevel: 1,
+      rareMultiplier: 1.55,
+      isWildSpace: true,
+      planetCount: sysRng.int(2, 5),
+    });
+    wildMidAdded++;
+  }
+
   // Post-pass: compute Conflict Level (distance to nearest hostile/war faction system), Tech Level, and Rare Multiplier
   for (const sys of systems) {
     if (sys.isBlackHole) continue;

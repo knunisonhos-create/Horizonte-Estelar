@@ -23,6 +23,7 @@ import {
 import type { CharacterAttributeId, CrewRole, InventoryItemRecord, OwnedShip, PlayerCampaignState, Rarity } from '../types/game';
 import {
   CONSUMABLES_BY_ID,
+  EXTRACTORS_BY_ID,
   HULLS_BY_ID,
   JUMP_DRIVES_BY_ID,
   RESOURCES_BY_ID,
@@ -34,10 +35,19 @@ import { DEFAULT_ORIGIN_BONUSES, SPECIAL_ABILITIES_BY_ID } from '../data/originP
 import {
   compartmentUsed,
   computeCrewBonuses,
+  computeCrewEquipmentMaintenance,
   computeCrewHarmony,
+  computeCrewMemberSupplyPerMin,
+  computeCrewSupplyDrainPerSec,
   computeShipDerivedStats,
+  computeShipTechLevel,
   crewHealthRatio,
+  getCrewItemMaintenancePerCycle,
+  getCrewManualExtractorIds,
+  getCrewSuitIds,
   getSuitGearEffectiveStats,
+  isCrewEquipableItem,
+  isManualExtractor,
   TECH_SYNERGY_BONUS,
 } from '../engine/combat';
 import {
@@ -48,7 +58,14 @@ import {
   xpRequiredForLevel,
 } from '../engine/character';
 import { FACTION_VAULT_FEE_PER_ITEM, factionVaultFee, factionVaultItemCount, normalizeFactionVault } from '../engine/factionVault';
-import { getEquipmentMeta, getLevelStyle, RARITY_STYLES, TECH_CATEGORY_META } from '../utils/formatting';
+import {
+  EXTRACTION_CLASS_LABELS,
+  getEquipmentMeta,
+  getLevelStyle,
+  RARITY_STYLES,
+  SUIT_GEAR_CATEGORY_LABELS,
+  TECH_CATEGORY_META,
+} from '../utils/formatting';
 import { CreatureCard } from './CreatureCard';
 import { CrewPortraitSprite, EquipmentSprite, HullSprite, ResourceSprite } from './SpriteArt';
 import { TechCategoryBadge } from './TechCategoryBadge';
@@ -61,7 +78,7 @@ const ROLE_INFO: Record<CrewRole, { label: string; desc: string }> = {
   explorador: { label: 'Explorador', desc: 'Melhora expedições em solo e reduz dano ambiental' },
   minerador: { label: 'Minerador', desc: 'Aumenta velocidade e rendimento de extração contínua' },
   diplomata: { label: 'Diplomata', desc: 'Aumenta reputação ganho, agiliza contato e facilita aliança' },
-  mestre_tripulacao: { label: 'Mestre de Tripulação', desc: 'Reduz gasto de mantimentos e custo de contratação' },
+  mestre_tripulacao: { label: 'Mestre de Tripulação', desc: 'Reduz fortemente o consumo de mantimentos e barateia contratação' },
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -111,6 +128,7 @@ function getSkillBadge(skill: number): { label: string; badge: string } {
 interface ShipAndCrewPanelProps {
   campaign: PlayerCampaignState;
   inOrbit: boolean;
+  damageItemCooldownSec?: number;
   onClose: () => void;
   onUseConsumable: (consumableId: string) => void;
   onEquipFromDepot: (depotUid: string) => void;
@@ -119,6 +137,7 @@ interface ShipAndCrewPanelProps {
     itemId: string,
     slotIndex: number
   ) => void;
+  onUnequipCrewGear: (crewGearUid: string) => void;
   onSwitchShip: (shipUid: string) => void;
   onToggleCrewStatus: (crewId: string) => void;
   onDismissCrew: (crewId: string) => void;
@@ -130,6 +149,7 @@ interface ShipAndCrewPanelProps {
     itemId: string,
     slotIndex: number
   ) => void;
+  onSendCrewGearToVault: (crewGearUid: string) => void;
   onEquipFromVault: (gearUid: string, shipUid: string) => void;
   onWithdrawResource: (resourceId: string, qty: number) => void;
   onWithdrawConsumable: (consumableId: string, qty: number) => void;
@@ -145,10 +165,12 @@ interface ShipAndCrewPanelProps {
 export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
   campaign,
   inOrbit: _inOrbit,
+  damageItemCooldownSec = 0,
   onClose,
   onUseConsumable,
   onEquipFromDepot,
   onUnequip,
+  onUnequipCrewGear,
   onSwitchShip,
   onToggleCrewStatus,
   onDismissCrew,
@@ -156,6 +178,7 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
   onSendConsumableToVault,
   onSendDepotToVault,
   onSendInstalledToVault,
+  onSendCrewGearToVault,
   onEquipFromVault,
   onWithdrawResource,
   onWithdrawConsumable,
@@ -192,15 +215,20 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
 
   const activeCrew = campaign.crew.filter((c) => c.status === 'ativo');
   const reserveCrew = campaign.crew.filter((c) => c.status === 'reserva');
-  const totalCrewSkill = campaign.crew.reduce((s, c) => s + c.skill, 0);
-  const supplyDrainPerSec = ((totalCrewSkill * bonuses.supplyCostMult) / 60) * (1.5 / 2.5) * 0.65;
+  const supplyDrainPerSec = computeCrewSupplyDrainPerSec(campaign.crew, bonuses.supplyCostMult);
   const cargoTotal = compartmentUsed(campaign, ship);
 
-  const suitGearEquipped = ship.suitGearIds.map((id) => SUIT_GEAR_BY_ID[id]).filter(Boolean);
-  const suitEffectiveStats = getSuitGearEffectiveStats(ship.suitGearIds, bonuses.activeTechCategory);
+  const crewEquipment = campaign.crewEquipment ?? [];
+  const crewMaint = computeCrewEquipmentMaintenance(campaign);
+  const crewSuitIds = getCrewSuitIds(campaign);
+  const crewManualExtractorIds = getCrewManualExtractorIds(campaign);
+  const suitGearEquipped = crewSuitIds.map((id) => SUIT_GEAR_BY_ID[id]).filter(Boolean);
+  const suitEffectiveStats = getSuitGearEffectiveStats(crewSuitIds, bonuses.activeTechCategory);
   const suitExplorationBonus = suitEffectiveStats.explorationBonus;
   const suitCombatPower = suitEffectiveStats.combatPower;
   const suitHazardProtections = new Set(suitGearEquipped.map((g) => g.hazardType).filter(Boolean)).size;
+  const depotCrewEquipable = ship.depot.filter((item) => isCrewEquipableItem(item.category, item.itemId));
+  const maxShipExtractors = Math.min(2, hull.extractionSlots);
 
   const utilitiesEquipped = ship.utilityIds.map((id) => UTILITY_BY_ID[id]).filter(Boolean);
   const utilityCargoBonus = utilitiesEquipped
@@ -287,14 +315,14 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
       });
     }
 
-    for (let i = 0; i < hull.extractionSlots; i++) {
+    for (let i = 0; i < maxShipExtractors; i++) {
       slots.push({
         key: `ex_${i}`,
-        slotLabel: `Extrator ${i + 1}/${hull.extractionSlots}`,
+        slotLabel: `Extrator de Nave ${i + 1}/${maxShipExtractors}`,
         category: 'extractor',
         itemId: ship.extractorIds[i] ?? null,
         slotIndex: i,
-        emptyHint: 'Encaixe de extrator vazio. Equipe um extrator pelo compartimento.',
+        emptyHint: 'Encaixe de extrator de nave vazio (máx. 2 por nave).',
       });
     }
 
@@ -309,27 +337,8 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
       });
     }
 
-    ship.suitGearIds.forEach((id, i) => {
-      slots.push({
-        key: `su_${i}_${id}`,
-        slotLabel: `Traje de Solo ${i + 1}`,
-        category: 'suit',
-        itemId: id,
-        slotIndex: i,
-        emptyHint: '',
-      });
-    });
-    slots.push({
-      key: `su_empty_${ship.suitGearIds.length}`,
-      slotLabel: `Traje de Solo ${ship.suitGearIds.length + 1}`,
-      category: 'suit',
-      itemId: null,
-      slotIndex: ship.suitGearIds.length,
-      emptyHint: 'Espaço livre para traje ou drone de expedição em solo.',
-    });
-
     return slots;
-  }, [ship, hull]);
+  }, [ship, hull, maxShipExtractors]);
 
   const activeConsumables = Object.entries(campaign.consumables).filter(([, qty]) => qty > 0);
   const vault = useMemo(() => normalizeFactionVault(campaign.factionVault), [campaign.factionVault]);
@@ -635,7 +644,7 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                   Equipamentos da Nave
                 </span>
                 <span className="text-[11px] text-slate-400">
-                  Arma {ship.weaponId ? 1 : 0}/{hull.weaponSlots} · Escudo {ship.shieldIds.length}/{hull.defenseSlots} · Extrator {ship.extractorIds.length}/{hull.extractionSlots} · Utilidade {ship.utilityIds.length}/{hull.utilitySlots}
+                  Arma {ship.weaponId ? 1 : 0}/{hull.weaponSlots} · Escudo {ship.shieldIds.length}/{hull.defenseSlots} · Extrator Nave {ship.extractorIds.length}/{maxShipExtractors} · Utilidade {ship.utilityIds.length}/{hull.utilitySlots}
                 </span>
               </div>
 
@@ -892,6 +901,7 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                     kind="species"
                     name={playerSpecies.name}
                     lifeFormId={playerSpecies.lifeFormId}
+                    gender={campaign.playerGender ?? 'M'}
                     description={playerSpecies.description}
                     sizeClass="w-20 h-20"
                     allowAiGeneration={false}
@@ -905,6 +915,7 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                       </h3>
                       <div className="text-xs text-slate-300 flex items-center gap-1.5 flex-wrap">
                         <span className="font-semibold text-cyan-300">{playerSpecies?.name ?? campaign.chosenSpeciesId}</span>
+                        <span className="text-slate-400">· {campaign.playerGender === 'F' ? 'Feminino' : 'Masculino'}</span>
                         {playerLifeForm && <span className="text-slate-500">· {playerLifeForm.name}</span>}
                         {originFaction && (
                           <span className="text-slate-400">
@@ -1151,80 +1162,248 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
               </div>
             </div>
 
+            {/* Crew Equipment: Suits, Vehicles, Tanks, Tools, Manual Extractors */}
+            <div className="bg-slate-950/90 border border-emerald-500/35 rounded-xl p-3 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-semibold text-white flex items-center gap-1.5">
+                  <Shield className="w-4 h-4 text-emerald-400" />
+                  Equipamentos da Tripulação ({crewEquipment.length})
+                </span>
+                <span className="px-2 py-0.5 rounded border border-amber-500/45 bg-amber-500/15 text-amber-300 text-[11px] font-mono-tabular font-semibold">
+                  Manutenção: {crewMaint.totalCost} cr/ciclo
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-snug">
+                Trajes, carros de exploração, tanques, drones e ferramentas manuais ficam com a tripulação — você pode equipar quantos quiser ao mesmo tempo (inclusive repetidos), pagando manutenção em créditos por ciclo.
+              </p>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] font-mono-tabular">
+                <div className="bg-slate-900/70 border border-slate-800 rounded-lg px-2 py-1.5 text-slate-300">
+                  Exploração <strong className="text-emerald-300">+{suitExplorationBonus}</strong>
+                </div>
+                <div className="bg-slate-900/70 border border-slate-800 rounded-lg px-2 py-1.5 text-slate-300">
+                  Combate solo <strong className="text-rose-300">+{suitCombatPower}</strong>
+                </div>
+                <div className="bg-slate-900/70 border border-slate-800 rounded-lg px-2 py-1.5 text-slate-300">
+                  Proteções <strong className="text-cyan-300">{suitHazardProtections}/5</strong>
+                </div>
+                <div className="bg-slate-900/70 border border-slate-800 rounded-lg px-2 py-1.5 text-slate-300">
+                  Extr. Manuais <strong className="text-amber-300">{crewManualExtractorIds.length}</strong>
+                </div>
+              </div>
+
+              {crewEquipment.length === 0 ? (
+                <div className="text-[11px] text-slate-500 italic bg-slate-900/45 border border-dashed border-slate-800 rounded-lg p-2.5">
+                  Nenhum equipamento na tripulação. Equipe trajes, veículos, tanques ou ferramentas manuais do compartimento ou do cofre.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-2">
+                  {crewEquipment.map((item) => {
+                    const meta = getEquipmentMeta(item.category, item.itemId);
+                    const rStyle = RARITY_STYLES[meta.rarity] ?? RARITY_STYLES.comum;
+                    const maint = getCrewItemMaintenancePerCycle(item.category, item.itemId);
+                    const suitDef = item.category === 'suit' ? SUIT_GEAR_BY_ID[item.itemId] : undefined;
+                    const extDef = item.category === 'extractor' ? EXTRACTORS_BY_ID[item.itemId] : undefined;
+                    const typeTag = suitDef
+                      ? SUIT_GEAR_CATEGORY_LABELS[suitDef.category]
+                      : extDef
+                        ? `Extrator Manual (${EXTRACTION_CLASS_LABELS[extDef.extractionClass]})`
+                        : 'Equipamento';
+                    return (
+                      <div
+                        key={item.uid}
+                        className={`bg-slate-900/80 border rounded-xl p-2.5 flex items-start gap-2.5 ${rStyle.border}`}
+                      >
+                        <EquipmentSprite category={item.category} itemId={item.itemId} size={36} />
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-start justify-between gap-2 flex-wrap">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`font-semibold text-xs ${rStyle.text}`}>{meta.name}</span>
+                                <TechCategoryBadge
+                                  category={meta.factionStyle}
+                                  activeCategory={bonuses.activeTechCategory}
+                                  bonusText="+25%"
+                                  compact
+                                />
+                                <RarityBadge rarity={meta.rarity} />
+                              </div>
+                              <div className="text-[10px] text-slate-400 flex items-center gap-2 flex-wrap">
+                                <span>{typeTag}</span>
+                                <span className="text-amber-300 font-mono-tabular font-semibold">-{maint} cr/ciclo</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-[10px] text-cyan-300 font-mono-tabular">{meta.statsLine}</div>
+                          {meta.description && (
+                            <div className="text-[11px] text-slate-300 leading-snug">{meta.description}</div>
+                          )}
+                          <div className="pt-1 flex items-center justify-end gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              disabled={cargoFree <= 0}
+                              onClick={() => onUnequipCrewGear(item.uid)}
+                              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-100 text-[11px] font-semibold cursor-pointer"
+                            >
+                              Guardar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onSendCrewGearToVault(item.uid)}
+                              className={`${vaultButtonClass} text-[11px]`}
+                            >
+                              Enviar para o Cofre
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {depotCrewEquipable.length > 0 && (
+                <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                  <div className="text-[10px] uppercase tracking-wider text-cyan-300 font-semibold">
+                    No Compartimento ({depotCrewEquipable.length} prontos para equipar)
+                  </div>
+                  <div className="space-y-1.5">
+                    {depotCrewEquipable.map((item) => {
+                      const meta = getEquipmentMeta(item.category, item.itemId);
+                      const maint = getCrewItemMaintenancePerCycle(item.category, item.itemId);
+                      const rStyle = RARITY_STYLES[meta.rarity] ?? RARITY_STYLES.comum;
+                      return (
+                        <div
+                          key={item.uid}
+                          className="bg-slate-900/55 border border-slate-800 rounded-lg px-2.5 py-2 flex items-center justify-between gap-2"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <EquipmentSprite category={item.category} itemId={item.itemId} size={28} />
+                            <div className="min-w-0">
+                              <div className={`text-[11px] font-semibold truncate ${rStyle.text}`}>{meta.name}</div>
+                              <div className="text-[10px] text-slate-400 truncate">
+                                {meta.statsLine} · <span className="text-amber-300">+{maint} cr/ciclo</span>
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => onEquipFromDepot(item.uid)}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-semibold shrink-0 cursor-pointer"
+                          >
+                            Equipar
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* 8 Active Stations */}
             <div className="space-y-2">
               <div className="font-semibold text-slate-200">
                 Postos Ativos ({activeCrew.length}/{hull.activeCrewPosts})
               </div>
               {(Object.keys(ROLE_INFO) as CrewRole[]).map((role) => {
-                const member = activeCrew.find((c) => c.role === role);
+                const roleActives = activeCrew.filter((c) => c.role === role);
                 const reservesForRole = reserveCrew.filter((c) => c.role === role);
                 const bonusPct = reservesForRole.length * 5;
-                const skillMeta = member ? getSkillBadge(member.skill) : null;
-                const spName = member ? SPECIES_BY_ID[member.speciesId]?.name : null;
-                return (
-                  <div
-                    key={role}
-                    className="bg-slate-950/90 border border-slate-800 rounded-xl p-2.5 flex items-start gap-2.5"
-                  >
-                    {member ? (
-                      <CrewPortraitSprite speciesId={member.speciesId} role={member.role} size={38} />
-                    ) : (
+                if (roleActives.length === 0) {
+                  return (
+                    <div
+                      key={role}
+                      className="bg-slate-950/90 border border-slate-800 rounded-xl p-2.5 flex items-start gap-2.5"
+                    >
                       <div className="w-[38px] h-[38px] rounded-lg border border-dashed border-slate-800 bg-slate-900/50 flex items-center justify-center text-slate-600 shrink-0">
                         <Users className="w-4 h-4" />
                       </div>
-                    )}
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <span className="font-semibold text-cyan-300">{ROLE_INFO[role].label}</span>
-                        {member && skillMeta ? (
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-semibold text-cyan-300">{ROLE_INFO[role].label}</span>
+                          <span className="text-slate-500">Posto Vago</span>
+                        </div>
+                        <div className="text-[11px] text-slate-400">{ROLE_INFO[role].desc}</div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return roleActives.map((member, mIdx) => {
+                  const skillMeta = getSkillBadge(member.skill);
+                  const spName = SPECIES_BY_ID[member.speciesId]?.name;
+                  return (
+                    <div
+                      key={member.id}
+                      className="bg-slate-950/90 border border-slate-800 rounded-xl p-2.5 flex items-start gap-2.5"
+                    >
+                      <CrewPortraitSprite speciesId={member.speciesId} role={member.role} size={38} />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-semibold text-cyan-300">
+                            {ROLE_INFO[role].label}
+                            {mIdx > 0 ? ' (Extra)' : ''}
+                          </span>
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-white font-semibold">{member.name}</span>
                             <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold font-mono-tabular ${skillMeta.badge}`}>
                               {skillMeta.label}
                             </span>
-                            {bonusPct > 0 && (
+                            {bonusPct > 0 && mIdx === 0 && (
                               <span className="text-emerald-300 text-[10px] font-mono-tabular">(+{bonusPct}%)</span>
                             )}
                           </div>
-                        ) : (
-                          <span className="text-slate-500">Posto Vago</span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-slate-400 flex items-center justify-between gap-2">
-                        <span>
-                          {ROLE_INFO[role].desc}
-                          {member && spName && ` · ${spName} (${Number((member.skill * bonuses.supplyCostMult * (1.5 / 2.5) * 0.65).toFixed(1))} mant./min)`}
-                        </span>
-                        {member && (
-                          <div className="flex gap-1 shrink-0">
+                        </div>
+                        <div className="text-[11px] text-slate-400 flex items-center justify-between gap-2">
+                          <span>
+                            {ROLE_INFO[role].desc}
+                            {spName &&
+                              ` · ${spName} (${Number(
+                                computeCrewMemberSupplyPerMin(
+                                  member,
+                                  bonuses.supplyCostMult,
+                                  activeCrew.findIndex((c) => c.id === member.id) >= 3
+                                ).toFixed(1)
+                              )} mant./min)`}
+                          </span>
+                          <div className="flex gap-1.5 shrink-0">
                             <button
                               type="button"
                               disabled={reserveCrew.length >= hull.reserveQuarters}
-                              onClick={() => onToggleCrewStatus(member.id)}
-                              className="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 cursor-pointer"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onToggleCrewStatus(member.id);
+                              }}
+                              className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 cursor-pointer"
                               title={
                                 reserveCrew.length >= hull.reserveQuarters
                                   ? 'Quartos reserva lotados'
                                   : 'Mover para Reserva'
                               }
                             >
-                              <ArrowUpDown className="w-3 h-3" />
+                              <ArrowUpDown className="w-3.5 h-3.5" />
                             </button>
                             <button
                               type="button"
-                              onClick={() => onDismissCrew(member.id)}
-                              className="p-1 rounded bg-slate-800 hover:bg-rose-600 text-slate-300 cursor-pointer"
-                              title="Dispensar"
+                              aria-label={`Dispensar ${member.name}`}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onDismissCrew(member.id);
+                              }}
+                              className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-200 cursor-pointer"
+                              title={`Dispensar ${member.name}`}
                             >
-                              <Trash2 className="w-3 h-3" />
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
-                        )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
+                  );
+                });
               })}
             </div>
 
@@ -1254,14 +1433,21 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                             </span>
                           </div>
                           <div className="text-[11px] text-cyan-300">{ROLE_INFO[m.role].label}</div>
-                          <div className="text-[10px] text-slate-400">{ROLE_INFO[m.role].desc}</div>
+                          <div className="text-[10px] text-slate-400">
+                            {ROLE_INFO[m.role].desc} ·{' '}
+                            {Number(computeCrewMemberSupplyPerMin(m, bonuses.supplyCostMult).toFixed(1))} mant./min (reserva)
+                          </div>
                         </div>
                       </div>
-                      <div className="flex gap-1 shrink-0">
+                      <div className="flex gap-1.5 shrink-0 items-center">
                         <button
                           type="button"
                           disabled={roleFull}
-                          onClick={() => onToggleCrewStatus(m.id)}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onToggleCrewStatus(m.id);
+                          }}
                           className="px-2 py-1 rounded bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold cursor-pointer"
                           title={roleFull ? 'Postos ativos da nave estão cheios' : 'Promover para posto ativo'}
                         >
@@ -1269,8 +1455,14 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => onDismissCrew(m.id)}
-                          className="p-1 rounded bg-slate-800 hover:bg-rose-600 text-slate-300 cursor-pointer"
+                          aria-label={`Dispensar ${m.name}`}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onDismissCrew(m.id);
+                          }}
+                          className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-200 cursor-pointer"
+                          title={`Dispensar ${m.name}`}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1312,10 +1504,17 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                               <span className="font-mono-tabular text-cyan-200">({qty})</span>
                               <button
                                 type="button"
+                                disabled={Boolean(def.combatEffect?.damageAllEnemies) && damageItemCooldownSec > 0}
                                 onClick={() => onUseConsumable(id)}
-                                className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold shrink-0 cursor-pointer"
+                                className={`px-2.5 py-1.5 rounded-lg font-semibold shrink-0 ${
+                                  Boolean(def.combatEffect?.damageAllEnemies) && damageItemCooldownSec > 0
+                                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                                    : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 cursor-pointer'
+                                }`}
                               >
-                                Usar
+                                {Boolean(def.combatEffect?.damageAllEnemies) && damageItemCooldownSec > 0
+                                  ? `${Math.ceil(damageItemCooldownSec)}s`
+                                  : 'Usar'}
                               </button>
                               <SendToVaultButtons qty={qty} onSend={(amount) => onSendConsumableToVault(id, amount)} />
                             </span>
@@ -1349,6 +1548,16 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                       : item.category === 'suit'
                       ? '+25%'
                       : '+20%';
+                  const itemCategoryLabel =
+                    item.category === 'extractor'
+                      ? isManualExtractor(item.itemId)
+                        ? 'Extrator Manual (Tripulação)'
+                        : 'Extrator de Nave (máx. 2/nave)'
+                      : item.category === 'suit'
+                        ? SUIT_GEAR_CATEGORY_LABELS[SUIT_GEAR_BY_ID[item.itemId]?.category ?? 'protecao']
+                        : CATEGORY_LABELS[item.category] ?? item.category;
+                  const crewEquipable = isCrewEquipableItem(item.category, item.itemId);
+                  const maintCost = crewEquipable ? getCrewItemMaintenancePerCycle(item.category, item.itemId) : 0;
                   return (
                     <div key={item.uid} className={`bg-slate-950/90 border rounded-xl p-2.5 flex items-start gap-2.5 ${rStyle.border}`}>
                       <EquipmentSprite category={item.category} itemId={item.itemId} size={36} />
@@ -1365,8 +1574,11 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                               />
                               <RarityBadge rarity={meta.rarity} />
                             </div>
-                            <div className="text-[10px] text-slate-400">
-                              {CATEGORY_LABELS[item.category] ?? item.category}
+                            <div className="text-[10px] text-slate-400 flex items-center gap-2 flex-wrap">
+                              <span>{itemCategoryLabel}</span>
+                              {crewEquipable && (
+                                <span className="text-amber-300 font-mono-tabular">+{maintCost} cr/ciclo</span>
+                              )}
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-1 shrink-0 justify-end">
@@ -1375,7 +1587,7 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                               onClick={() => onEquipFromDepot(item.uid)}
                               className="px-2.5 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold shrink-0 cursor-pointer"
                             >
-                              Equipar
+                              {crewEquipable ? 'Equipar na Tripulação' : 'Equipar na Nave'}
                             </button>
                             <button
                               type="button"
@@ -1450,6 +1662,13 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
               const sFac = FACTIONS_BY_ID[s.factionId ?? campaign.chosenFactionId];
               const sColor = s.color ?? sFac?.color ?? sHull?.color ?? '#38bdf8';
               const isActive = s.uid === campaign.activeShipUid;
+              const sLevel = computeShipTechLevel(s);
+              const inSquadron =
+                campaign.factionCommand?.rank3Choice === 'esquadrao' &&
+                (campaign.factionCommand?.squadronShipUids ?? []).includes(s.uid);
+              const inCollection =
+                campaign.factionCommand?.rank3Choice === 'coleta' &&
+                (campaign.factionCommand?.resourceCollection?.shipUids ?? []).includes(s.uid);
               return (
                 <div
                   key={s.uid}
@@ -1462,6 +1681,9 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="font-bold text-white">{s.customName}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300 text-[10px] font-mono-tabular font-semibold">
+                            Nível {sLevel}
+                          </span>
                           {sHull && <RarityBadge rarity={sHull.rarity} />}
                           {sHull && (
                             <TechCategoryBadge
@@ -1474,6 +1696,16 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                           {isActive && (
                             <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-[10px] font-semibold">
                               Pilotando Agora
+                            </span>
+                          )}
+                          {inSquadron && (
+                            <span className="px-1.5 py-0.5 rounded bg-sky-500/20 border border-sky-500/50 text-sky-300 text-[10px] font-semibold">
+                              Esquadrão (+{sLevel}%)
+                            </span>
+                          )}
+                          {inCollection && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-300 text-[10px] font-semibold">
+                              Coleta Estratégica
                             </span>
                           )}
                         </div>
@@ -1560,6 +1792,16 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                 vault.gear.map((item) => {
                   const meta = getEquipmentMeta(item.category, item.itemId);
                   const rStyle = RARITY_STYLES[meta.rarity] ?? RARITY_STYLES.comum;
+                  const crewEquipable = isCrewEquipableItem(item.category, item.itemId);
+                  const crewMaintCost = crewEquipable ? getCrewItemMaintenancePerCycle(item.category, item.itemId) : 0;
+                  const catLabel =
+                    item.category === 'extractor'
+                      ? isManualExtractor(item.itemId)
+                        ? 'Extrator Manual (Tripulação)'
+                        : 'Extrator de Nave'
+                      : item.category === 'suit'
+                        ? SUIT_GEAR_CATEGORY_LABELS[SUIT_GEAR_BY_ID[item.itemId]?.category ?? 'protecao']
+                        : CATEGORY_LABELS[item.category] ?? item.category;
                   return (
                     <div key={item.uid} className={`bg-slate-950/90 border rounded-xl p-2.5 flex items-start gap-2.5 ${rStyle.border}`}>
                       <EquipmentSprite category={item.category} itemId={item.itemId} size={36} />
@@ -1576,7 +1818,10 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                               <RarityBadge rarity={meta.rarity} />
                             </div>
                             <div className="text-[10px] text-slate-400">
-                              {CATEGORY_LABELS[item.category] ?? item.category} · {FACTION_VAULT_FEE_PER_ITEM} créditos por ciclo
+                              {catLabel} · {FACTION_VAULT_FEE_PER_ITEM} créditos por ciclo (cofre)
+                              {crewEquipable && (
+                                <span className="text-amber-300"> · +{crewMaintCost} cr/ciclo se equipar</span>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -1588,7 +1833,9 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                             onClick={() => onEquipFromVault(item.uid, equipShip.uid)}
                             className="px-2.5 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold cursor-pointer"
                           >
-                            Equipar{campaign.ships.length > 1 ? ` em ${equipShip.customName}` : ''}
+                            {crewEquipable
+                              ? 'Equipar na Tripulação'
+                              : `Equipar${campaign.ships.length > 1 ? ` em ${equipShip.customName}` : ''}`}
                           </button>
                           <button
                             type="button"
@@ -1694,10 +1941,17 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
                             <div className="flex flex-wrap gap-1 justify-end mt-1.5">
                               <button
                                 type="button"
+                                disabled={Boolean(def.combatEffect?.damageAllEnemies) && damageItemCooldownSec > 0}
                                 onClick={() => onUseVaultConsumable(id)}
-                                className="px-2.5 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold cursor-pointer"
+                                className={`px-2.5 py-1 rounded-lg font-semibold ${
+                                  Boolean(def.combatEffect?.damageAllEnemies) && damageItemCooldownSec > 0
+                                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                                    : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 cursor-pointer'
+                                }`}
                               >
-                                Usar
+                                {Boolean(def.combatEffect?.damageAllEnemies) && damageItemCooldownSec > 0
+                                  ? `${Math.ceil(damageItemCooldownSec)}s`
+                                  : 'Usar'}
                               </button>
                               <button
                                 type="button"

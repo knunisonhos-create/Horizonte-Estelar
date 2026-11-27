@@ -72,6 +72,104 @@ export function planetResourceRemainingStock(
   return Math.max(0, maxStock - Math.max(0, alreadyPurchased));
 }
 
+export function consumableStockKey(consumableId: string): string {
+  return `consumable:${consumableId}`;
+}
+
+export function equipmentStockKey(
+  category: 'weapon' | 'shield' | 'jumpDrive' | 'extractor' | 'utility' | 'suit',
+  itemId: string
+): string {
+  return `equip:${category}:${itemId}`;
+}
+
+export function hullStockKey(hullId: string): string {
+  return `hull:${hullId}`;
+}
+
+export function blueprintStockKey(blueprintId: string): string {
+  return `blueprint:${blueprintId}`;
+}
+
+export function planetConsumableMaxStock(rarity: Rarity, planetTech: number): number {
+  const techBonus = planetTech >= 4 ? 1.5 : 1;
+  switch (rarity) {
+    case 'lendário':
+      return 1;
+    case 'épico':
+      return 3;
+    case 'raro':
+      return Math.round(4 * techBonus);
+    case 'incomum':
+      return Math.round(7 * techBonus);
+    case 'comum':
+    default:
+      return Math.round(12 * techBonus);
+  }
+}
+
+export function planetConsumableRemainingStock(
+  rarity: Rarity,
+  planetTech: number,
+  alreadyPurchased: number
+): number {
+  const maxStock = planetConsumableMaxStock(rarity, planetTech);
+  return Math.max(0, maxStock - Math.max(0, alreadyPurchased));
+}
+
+export function planetEquipmentMaxStock(
+  rarity: Rarity,
+  planetTech: number,
+  isFactionMatch: boolean
+): number {
+  const base =
+    rarity === 'lendário'
+      ? 1
+      : rarity === 'épico'
+      ? 1
+      : rarity === 'raro'
+      ? 2
+      : rarity === 'incomum'
+      ? 3
+      : 4;
+  if (rarity !== 'lendário' && (isFactionMatch || planetTech >= 5)) {
+    return base + 1;
+  }
+  return base;
+}
+
+export function planetEquipmentRemainingStock(
+  rarity: Rarity,
+  planetTech: number,
+  isFactionMatch: boolean,
+  alreadyPurchased: number
+): number {
+  const maxStock = planetEquipmentMaxStock(rarity, planetTech, isFactionMatch);
+  return Math.max(0, maxStock - Math.max(0, alreadyPurchased));
+}
+
+export function planetHullMaxStock(rarity: Rarity): number {
+  switch (rarity) {
+    case 'lendário':
+    case 'épico':
+      return 1;
+    case 'raro':
+    case 'incomum':
+      return 2;
+    case 'comum':
+    default:
+      return 3;
+  }
+}
+
+export function planetHullRemainingStock(rarity: Rarity, alreadyPurchased: number): number {
+  return Math.max(0, planetHullMaxStock(rarity) - Math.max(0, alreadyPurchased));
+}
+
+export function planetBlueprintRemainingStock(alreadyPurchased: number): number {
+  return Math.max(0, 1 - Math.max(0, alreadyPurchased));
+}
+
 /** Local −15%, importado de outro mundo do sistema 0% (tabela), ausente +25%. */
 export function supplyFactor(band: SupplyBand): number {
   if (band === 'local') return 0.85;

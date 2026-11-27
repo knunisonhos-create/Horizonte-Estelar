@@ -228,10 +228,13 @@ export interface JumpDriveDef {
   description: string;
 }
 
+export type ExtractorScope = 'nave' | 'manual';
+
 export interface ExtractorDef {
   id: string;
   name: string;
   extractionClass: ExtractionClass;
+  extractorScope: ExtractorScope;
   ratePerSec: number; // 1.0, 1.5-1.6, 2.2, 2.8
   techTier: number; // 1..5
   price: number;
@@ -258,7 +261,7 @@ export interface UtilityModuleDef {
 export interface SuitGearDef {
   id: string;
   name: string;
-  category: 'protecao' | 'ferramenta' | 'drone';
+  category: 'protecao' | 'ferramenta' | 'drone' | 'veiculo' | 'tanque';
   hazardType?: 'calor' | 'frio' | 'radiacao' | 'toxicidade' | 'pressao';
   explorationBonus: number;
   combatPower: number;
@@ -522,7 +525,8 @@ export interface OwnedShip {
   jumpDriveId: string;
   extractorIds: string[];
   utilityIds: string[];
-  suitGearIds: string[];
+  /** Legado: equipamentos da tripulação agora ficam em PlayerCampaignState.crewEquipment. */
+  suitGearIds?: string[];
   depot: InventoryItemRecord[]; // max 30 items per ship
 }
 
@@ -647,6 +651,11 @@ export interface ActiveEnemy {
   maxHull: number;
   shield: number;
   maxShield: number;
+  armor?: number;
+  shieldRegen?: number;
+  shieldMitigation?: number;
+  enhancerBonusPct?: number;
+  enhancerLabel?: string;
   dps: number;
   damageType: WeaponDamageType;
   combatScore: number;
@@ -665,7 +674,15 @@ export type EncounterGearCategory = 'weapon' | 'shield' | 'jumpDrive' | 'extract
 
 export type EncounterSellOffer =
   | { kind: 'recurso'; resourceId: string; price: number }
-  | { kind: 'instalado'; category: EncounterGearCategory; itemId: string; slotIndex: number; price: number };
+  | {
+      kind: 'instalado';
+      category: EncounterGearCategory;
+      itemId: string;
+      slotIndex: number;
+      source?: 'ship' | 'crew';
+      crewUid?: string;
+      price: number;
+    };
 
 export interface EncounterState {
   id: string;
@@ -732,21 +749,35 @@ export interface FleetPatrolAssignment {
   factionId: string;
 }
 
+export type Rank3WarAbilityChoice = 'esquadrao' | 'coleta';
+
+export interface Rank3ResourceCollectionState {
+  shipUids: string[];
+  resourceId: string;
+  factionId: string;
+}
+
 export interface FactionCommandState {
   supremeCaptainFactionIds: string[];
   lastOffensiveCycle?: number;
   lastDiplomacyCycle?: number;
   activePatrol?: FleetPatrolAssignment | null;
+  rank3Choice?: Rank3WarAbilityChoice | null;
+  squadronShipUids?: string[];
+  resourceCollection?: Rank3ResourceCollectionState | null;
   supremeColonizeSystemId?: string | null;
   supremePriorityEnemyFactionId?: string | null;
   supremeShieldCycle?: number;
   totalTributeEarned?: number;
 }
 
+export type CharacterGender = 'M' | 'F';
+
 export interface PlayerCampaignState {
   version: number;
   started: boolean;
   playerName: string;
+  playerGender?: CharacterGender;
   chosenSpeciesId: string;
   chosenFactionId: string;
   character: CharacterProgressState;
@@ -780,6 +811,8 @@ export interface PlayerCampaignState {
   consumables: Record<string, number>;
   blueprintsOwned: string[];
   crew: CrewMember[];
+  crewEquipment?: InventoryItemRecord[];
+  hiredCrewCandidateIds?: string[];
   missions: Mission[];
   logbook: LogEntry[];
   gameTimeSeconds: number;

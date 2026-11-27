@@ -165,6 +165,14 @@ export const EXTRACTION_CLASS_LABELS: Record<ExtractionClass, string> = {
   escavador_arqueologico: 'Escavador Arqueológico',
 };
 
+export const SUIT_GEAR_CATEGORY_LABELS: Record<'protecao' | 'ferramenta' | 'drone' | 'veiculo' | 'tanque', string> = {
+  protecao: 'Traje de Proteção',
+  ferramenta: 'Ferramenta de Campo',
+  drone: 'Drone de Reconhecimento',
+  veiculo: 'Carro de Exploração',
+  tanque: 'Tanque de Expedição',
+};
+
 export function getEquipmentMeta(
   category: 'weapon' | 'shield' | 'jumpDrive' | 'extractor' | 'utility' | 'suit' | 'hull' | 'blueprint',
   id: string
@@ -207,13 +215,14 @@ export function getEquipmentMeta(
   if (category === 'extractor') {
     const e = EXTRACTORS_BY_ID[id];
     if (!e) return { name: id, rarity: 'comum', factionStyle: 'silicoide', description: '', statsLine: '' };
+    const scopeLabel = e.extractorScope === 'nave' ? 'Extração de Nave (máx. 2/nave)' : 'Extração Manual (Tripulação)';
     return {
       name: e.name,
       rarity: e.rarity,
       factionStyle: e.factionStyle,
       level: e.techTier,
       description: e.description,
-      statsLine: `${EXTRACTION_CLASS_LABELS[e.extractionClass]} · ${e.ratePerSec.toFixed(1)} un./s`,
+      statsLine: `${scopeLabel} · ${EXTRACTION_CLASS_LABELS[e.extractionClass]} · ${e.ratePerSec.toFixed(1)} un./s`,
     };
   }
   if (category === 'utility') {
@@ -230,12 +239,13 @@ export function getEquipmentMeta(
   if (category === 'suit') {
     const g = SUIT_GEAR_BY_ID[id];
     if (!g) return { name: id, rarity: 'comum', factionStyle: 'pesquisadores', description: '', statsLine: '' };
+    const kindLabel = SUIT_GEAR_CATEGORY_LABELS[g.category] ?? 'Equipamento';
     return {
       name: g.name,
       rarity: g.rarity,
       factionStyle: g.factionStyle,
       description: g.description,
-      statsLine: `Exploração +${g.explorationBonus} · Combate solo +${g.combatPower}`,
+      statsLine: `${kindLabel} · Exploração +${g.explorationBonus} · Combate solo +${g.combatPower}`,
     };
   }
   if (category === 'hull') {

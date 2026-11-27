@@ -1,12 +1,13 @@
 import React from 'react';
 import { ChevronRight, Cpu, Shield, Sparkles } from 'lucide-react';
-import type { VisualNovelChoice, VisualNovelNode } from '../types/game';
+import type { CharacterGender, VisualNovelChoice, VisualNovelNode } from '../types/game';
 import { SPECIES_BY_ID } from '../data/lifeforms';
 import { CreatureCard } from './CreatureCard';
 import { EquipmentSprite, HullSprite } from './SpriteArt';
 
 interface VisualNovelOverlayProps {
   node: VisualNovelNode;
+  playerGender?: CharacterGender;
   onSelectChoice: (choice: VisualNovelChoice) => void;
 }
 
@@ -17,7 +18,11 @@ const OPENING_STEPS = [
   '4. Facção',
 ];
 
-export const VisualNovelOverlay: React.FC<VisualNovelOverlayProps> = ({ node, onSelectChoice }) => {
+export const VisualNovelOverlay: React.FC<VisualNovelOverlayProps> = ({
+  node,
+  playerGender = 'M',
+  onSelectChoice,
+}) => {
   const sp = SPECIES_BY_ID[node.speciesId];
 
   if (node.isOpening) {
@@ -76,6 +81,7 @@ export const VisualNovelOverlay: React.FC<VisualNovelOverlayProps> = ({ node, on
                 kind={node.cardKind}
                 name={node.speakerName}
                 lifeFormId={sp?.lifeFormId ?? 'humanoide'}
+                gender={playerGender}
                 description={node.speakerTitle}
                 sizeClass="w-24 h-24 sm:w-32 sm:h-32 md:w-36 md:h-36"
                 allowAiGeneration={true}

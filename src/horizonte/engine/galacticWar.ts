@@ -11,6 +11,7 @@ import { generateSolarSystem, getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from 
 import { applyFactionVaultFee } from './factionVault';
 
 export const GALACTIC_CYCLE_DURATION_SEC = 180;
+export const SUPREME_CAPTAIN_MIN_RENOWN = 800;
 
 type MilitaryPlanet = {
   id: string;
@@ -646,7 +647,7 @@ export function advanceGalacticCycle(
   const myFacId = campaign.chosenFactionId;
   const isSupreme = Boolean(
     cmd?.supremeCaptainFactionIds?.includes(myFacId) &&
-      (campaign.factionRenown[myFacId] ?? 0) >= 650
+      (campaign.factionRenown[myFacId] ?? 0) >= SUPREME_CAPTAIN_MIN_RENOWN
   );
   const shieldActive = isSupreme && cmd?.supremeShieldCycle === campaign.galacticCycle;
   const priorityEnemy = isSupreme ? cmd?.supremePriorityEnemyFactionId : null;

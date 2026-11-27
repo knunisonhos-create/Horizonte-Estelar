@@ -1,30 +1,35 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { SlidersHorizontal, Eye, Compass, AlertTriangle, Zap, X, Crown, Fuel, Globe2, Cpu, ShieldAlert, Sparkles } from 'lucide-react';
+import { SlidersHorizontal, Eye, Compass, AlertTriangle, Zap, X, Crown, Fuel, Globe2, Cpu, ShieldAlert, Sparkles, Radar, Lock } from 'lucide-react';
 import type {
   GalacticRegion,
   LifeFormId,
   PlayerCampaignState,
+  Rarity,
+  ResourceDef,
   StarSystemSummary,
 } from '../types/game';
+import { RESOURCES_BY_ID } from '../data/items';
 import { FACTIONS, FACTIONS_BY_ID, isFactionConservative, LIFE_FORMS, SPECIES } from '../data/lifeforms';
-import { GALAXY_NEBULAE, getSystemsInRadius, getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from '../data/universe';
-import { getRenownTierName, getSystemHostileStatus } from '../data/narrative';
+import { GALAXY_NEBULAE, generateSolarSystem, getSystemsInRadius, getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from '../data/universe';
+import { destroyedWorldDeposits, getRenownTierName, getSystemHostileStatus } from '../data/narrative';
 import { createRadialGlowTexture } from '../engine/proceduralTextures';
 import { computeCrewBonuses, computeShipDerivedStats } from '../engine/combat';
 import { getEffectiveSystemSummary } from '../engine/galacticWar';
 import { getPlayerFactionRank, normalizeFactionCommand } from '../engine/factionRanks';
 import { soundEngine } from '../engine/audio';
 import { canvasPixelRatio } from '../utils/mobileLandscape';
-import { getLevelStyle } from '../utils/formatting';
+import { getLevelStyle, RARITY_STYLES } from '../utils/formatting';
 import { MissionCornerHud } from './MissionsAndCodexPanel';
+import { ResourceSprite } from './SpriteArt';
 
 const VISUAL_SCALE = 4.2; // Section 20.2: 4.2x visual spacing while real distances & fuel stay exact
 
 interface GalacticMapViewportProps {
   campaign: PlayerCampaignState;
   currentSystem: StarSystemSummary;
+  depletedDeposits?: Record<string, number>;
   onJumpToSystem: (target: StarSystemSummary, fuelCost: number) => void;
   onRemoteScanSystem?: (target: StarSystemSummary) => void;
   onSetSupremeColonizeTarget?: (systemId: string | null) => void;
@@ -38,6 +43,7 @@ interface GalacticMapViewportProps {
 export const GalacticMapViewport: React.FC<GalacticMapViewportProps> = ({
   campaign,
   currentSystem,
+  depletedDeposits,
   onJumpToSystem,
   onRemoteScanSystem,
   onSetSupremeColonizeTarget,
@@ -575,14 +581,71 @@ export const GalacticMapViewport: React.FC<GalacticMapViewportProps> = ({
   const showFullDetails = selVisited || selScanned || shipStats.hasLongScanner;
   const rankInfo = useMemo(() => getPlayerFactionRank(campaign), [campaign]);
   const factionCmd = useMemo(() => normalizeFactionCommand(campaign.factionCommand), [campaign.factionCommand]);
+  const isPlayerFactionSystem = Boolean(
+    effectiveSelectedSystem.controllingFactionId &&
+      effectiveSelectedSystem.controllingFactionId === campaign.chosenFactionId
+  );
   const canRemoteScan =
     rankInfo.current.rank >= 4 &&
+    isPlayerFactionSystem &&
     Boolean(onRemoteScanSystem) &&
     effectiveSelectedSystem.id !== currentSystem.id &&
     !selVisited &&
     !selScanned;
   const isWildNonBh = !effectiveSelectedSystem.isBlackHole && effectiveSelectedSystem.controllingFactionId === null;
   const isSupremeColonizeTarget = factionCmd.supremeColonizeSystemId === effectiveSelectedSystem.id;
+
+  const selectedSystemResources = useMemo(() => {
+    if (rankInfo.current.rank < 4 || !isPlayerFactionSystem || effectiveSelectedSystem.isBlackHole) {
+      return [];
+    }
+    const full = generateSolarSystem(effectiveSelectedSystem);
+    const byRes = new Map<string, { resource: ResourceDef; totalQty: number; planetIds: Set<string> }>();
+    for (const pl of full.planets) {
+      const lv = campaign.planetOverrides?.[pl.id]?.level ?? pl.level;
+      const deps = lv === -1 ? destroyedWorldDeposits(pl) : pl.deposits;
+      for (const dep of deps) {
+        const remaining = depletedDeposits?.[dep.id] !== undefined ? depletedDeposits[dep.id] : dep.remaining;
+        if (remaining <= 0) continue;
+        const res = RESOURCES_BY_ID[dep.resourceId];
+        if (!res) continue;
+        let entry = byRes.get(res.id);
+        if (!entry) {
+          entry = { resource: res, totalQty: 0, planetIds: new Set<string>() };
+          byRes.set(res.id, entry);
+        }
+        entry.totalQty += remaining;
+        entry.planetIds.add(pl.id);
+      }
+    }
+    const rarityOrder: Record<Rarity, number> = {
+      único: 0,
+      lendário: 1,
+      épico: 2,
+      raro: 3,
+      incomum: 4,
+      comum: 5,
+    };
+    return Array.from(byRes.values())
+      .map((item) => ({
+        resource: item.resource,
+        totalQty: Math.round(item.totalQty),
+        planetCount: item.planetIds.size,
+      }))
+      .sort((a, b) => {
+        const ra = rarityOrder[a.resource.rarity] ?? 9;
+        const rb = rarityOrder[b.resource.rarity] ?? 9;
+        if (ra !== rb) return ra - rb;
+        if (b.totalQty !== a.totalQty) return b.totalQty - a.totalQty;
+        return a.resource.name.localeCompare(b.resource.name, 'pt-BR');
+      });
+  }, [
+    rankInfo.current.rank,
+    isPlayerFactionSystem,
+    effectiveSelectedSystem,
+    campaign.planetOverrides,
+    depletedDeposits,
+  ]);
 
   return (
     <div className="fixed inset-0 z-30 bg-[#03060d]">
@@ -750,9 +813,19 @@ export const GalacticMapViewport: React.FC<GalacticMapViewportProps> = ({
               className="w-full py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/60 text-indigo-200 cursor-pointer"
             >
               <Eye className="w-3.5 h-3.5" />
-              Varredura Orbital Remota (Patente 4+)
+              Escanear Sistema da Facção (Patente 4+)
             </button>
           )}
+          {rankInfo.current.rank >= 4 &&
+            !isPlayerFactionSystem &&
+            effectiveSelectedSystem.id !== currentSystem.id &&
+            !selVisited &&
+            !selScanned && (
+              <div className="w-full py-1.5 px-2.5 rounded-lg text-[11px] flex items-center gap-1.5 bg-slate-900/80 border border-slate-800 text-slate-400">
+                <Lock className="w-3.5 h-3.5 shrink-0 text-slate-500" />
+                <span>Scanner de Patente 4 funciona apenas em sistemas da sua facção.</span>
+              </div>
+            )}
           {rankInfo.isSupremeCaptain && isWildNonBh && onSetSupremeColonizeTarget && (
             <button
               type="button"
@@ -827,7 +900,15 @@ export const GalacticMapViewport: React.FC<GalacticMapViewportProps> = ({
         </button>
 
         {filtersOpen && (
-          <div data-tutorial-id="map-filters-panel" data-tutorial-scroll="map-filters-body" className="w-64 max-h-[calc(var(--fit-h)*0.82)] overflow-y-auto bg-[#090e1a]/95 border border-slate-700/80 rounded-xl p-3 space-y-3 text-xs shadow-2xl">
+          <div
+            data-tutorial-id="map-filters-panel"
+            data-tutorial-scroll="map-filters-body"
+            className={`w-64 ${
+              rankInfo.current.rank >= 4
+                ? 'max-h-[calc(var(--fit-h)*0.44)]'
+                : 'max-h-[calc(var(--fit-h)*0.82)]'
+            } overflow-y-auto bg-[#090e1a]/95 border border-slate-700/80 rounded-xl p-3 space-y-3 text-xs shadow-2xl`}
+          >
             <div>
               <label className="block text-slate-400 mb-1 font-medium">Facção</label>
               <select
@@ -977,8 +1058,84 @@ export const GalacticMapViewport: React.FC<GalacticMapViewportProps> = ({
         )}
       </div>
 
+      {/* Bottom-Right Rank 4 Solar System Resource Scanner */}
+      {rankInfo.current.rank >= 4 && (
+        <div className="fixed bottom-4 right-4 z-40 w-[min(21rem,calc(100%-2rem))] sm:w-80 bg-[#090e1a]/95 border border-cyan-500/40 rounded-xl p-3 shadow-2xl space-y-2">
+          <div className="flex items-start justify-between gap-2 border-b border-slate-800 pb-2">
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold text-cyan-300 flex items-center gap-1.5">
+                <Radar className="w-3.5 h-3.5 shrink-0" />
+                <span>Recursos do Sistema (Patente 4)</span>
+              </div>
+              <div className="text-xs font-bold text-white truncate mt-0.5">
+                {effectiveSelectedSystem.name}
+              </div>
+            </div>
+            <span className="px-1.5 py-0.5 rounded border border-slate-700 bg-slate-900 text-[10px] font-mono-tabular text-slate-300 shrink-0">
+              {effectiveSelectedSystem.planetCount} planeta{effectiveSelectedSystem.planetCount === 1 ? '' : 's'}
+            </span>
+          </div>
+
+          {!isPlayerFactionSystem ? (
+            <div className="flex items-start gap-2 text-[11px] text-slate-400 bg-slate-900/75 border border-slate-800 rounded-lg p-2.5">
+              <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0 mt-0.5" />
+              <span>
+                O scanner da Patente 4 opera exclusivamente nos sistemas pertencentes à{' '}
+                <strong className="text-slate-200">
+                  {FACTIONS_BY_ID[campaign.chosenFactionId]?.name ?? 'sua facção'}
+                </strong>
+                .
+              </span>
+            </div>
+          ) : effectiveSelectedSystem.isBlackHole ? (
+            <div className="text-[11px] text-slate-400 italic py-1">
+              Singularidade sem planetas mineráveis.
+            </div>
+          ) : selectedSystemResources.length === 0 ? (
+            <div className="text-[11px] text-slate-400 italic py-1">
+              Nenhum depósito mineral restante detectado nos planetas deste sistema.
+            </div>
+          ) : (
+            <div className="max-h-[min(15.5rem,calc(var(--fit-h)*0.36))] overflow-y-auto space-y-1.5 pr-0.5">
+              {selectedSystemResources.map((row) => {
+                const rStyle = RARITY_STYLES[row.resource.rarity] ?? RARITY_STYLES.comum;
+                return (
+                  <div
+                    key={row.resource.id}
+                    className={`bg-slate-900/85 border rounded-lg px-2 py-1.5 flex items-center justify-between gap-2 ${rStyle.border}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ResourceSprite resourceId={row.resource.id} size={28} />
+                      <div className="min-w-0">
+                        <div className={`text-xs font-semibold truncate ${rStyle.text}`}>
+                          {row.resource.name}
+                        </div>
+                        <div className="text-[10px] text-slate-400 capitalize">
+                          {row.resource.rarity} · em {row.planetCount} planeta{row.planetCount === 1 ? '' : 's'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-mono-tabular text-xs font-bold text-white">
+                        {row.totalQty.toLocaleString('pt-BR')} un.
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Bottom Legend */}
-      <div className="fixed bottom-4 left-4 right-4 z-40 max-w-[760px] bg-[#090e1a]/90 border border-slate-800 rounded-lg px-3 py-2 text-[11px] text-slate-300 flex flex-wrap items-center gap-x-4 gap-y-1">
+      <div
+        className={`fixed bottom-4 left-4 z-40 ${
+          rankInfo.current.rank >= 4
+            ? 'hidden md:flex right-[21.5rem] max-w-[740px]'
+            : 'right-4 max-w-[760px] flex'
+        } bg-[#090e1a]/90 border border-slate-800 rounded-lg px-3 py-2 text-[11px] text-slate-300 flex-wrap items-center gap-x-4 gap-y-1`}
+      >
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full border-2 border-yellow-400 inline-block" /> Sistema Prime (Sede)</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full border-2 border-cyan-400 inline-block" /> Sistema Atual</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full border-2 border-slate-200 inline-block" /> Selecionado</span>

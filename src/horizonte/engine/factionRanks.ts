@@ -3,13 +3,16 @@ import type {
   LogEntry,
   PlanetData,
   PlayerCampaignState,
+  Rank3ResourceCollectionState,
+  Rank3WarAbilityChoice,
   ResourceCargoRecord,
+  ResourceDef,
   StarSystemFull,
   StarSystemSummary,
 } from '../types/game';
 import { FACTIONS, FACTIONS_BY_ID } from '../data/lifeforms';
-import { HULLS_BY_ID, RESOURCES_BY_ID } from '../data/items';
-import { getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from '../data/universe';
+import { HULLS_BY_ID, RESOURCES, RESOURCES_BY_ID } from '../data/items';
+import { generateSolarSystem, getSystemSummaryById, KNOWN_GALAXY_SYSTEMS } from '../data/universe';
 import {
   advanceGalacticCycle,
   applyWarMissionProgressToWars,
@@ -17,9 +20,17 @@ import {
   getEffectiveSystemSummary,
   getFactionOwnedSystems,
   makeWarLogEntry,
+  SUPREME_CAPTAIN_MIN_RENOWN,
   syncActiveWarsMap,
 } from './galacticWar';
-import { computeCrewBonuses, computeShipDerivedStats, compartmentUsed } from './combat';
+import {
+  computeCrewBonuses,
+  computeCrewEquipmentMaintenance,
+  computeShipDerivedStats,
+  computeShipTechLevel,
+  compartmentUsed,
+} from './combat';
+import { normalizeFactionVault } from './factionVault';
 
 export interface FactionRankDef {
   rank: number; // 0..7
@@ -90,8 +101,8 @@ export const FACTION_RANKS: FactionRankDef[] = [
     missionCommissionPct: 15,
     scanBountyCredits: 65,
     killBountyPct: 25,
-    tacticalSummary: 'Defesa Planetária +20% (2 naves) + Despacho de Frota Secundária (patrulha automática).',
-    economySummary: 'Soldo de 280 cr/ciclo + lucros e saques da nave em patrulha.',
+    tacticalSummary: 'Defesa Planetária +20% (2 naves) + Escolha Patente 3: Esquadrão (+1%×nível, até 3 naves) ou Coleta Estratégica.',
+    economySummary: 'Soldo de 280 cr/ciclo + bônus de Esquadrão ou coleta de recursos raros/épicos/lendários nos sistemas da facção.',
   },
   {
     rank: 4,
@@ -104,7 +115,7 @@ export const FACTION_RANKS: FactionRankDef[] = [
     missionCommissionPct: 22,
     scanBountyCredits: 110,
     killBountyPct: 35,
-    tacticalSummary: 'Defesa Planetária +30% + Inteligência Orbital no Mapa Galáctico (varredura remota sem combustível).',
+    tacticalSummary: 'Defesa Planetária +30% + Scanner do Sistema Solar no Mapa Galáctico (varredura remota e recursos dos planetas da sua facção).',
     economySummary: 'Soldo 480 cr + 15 cr/sistema + 110 cr por planeta escaneado.',
   },
   {
@@ -138,7 +149,7 @@ export const FACTION_RANKS: FactionRankDef[] = [
   {
     rank: 7,
     title: 'Capitão Supremo',
-    minRenown: 650,
+    minRenown: SUPREME_CAPTAIN_MIN_RENOWN,
     defenseBonusPct: 60,
     defenseShipCount: 4,
     cycleSalary: 1650,
@@ -155,6 +166,9 @@ export function emptyFactionCommand(): FactionCommandState {
   return {
     supremeCaptainFactionIds: [],
     activePatrol: null,
+    rank3Choice: null,
+    squadronShipUids: [],
+    resourceCollection: null,
     supremeColonizeSystemId: null,
     supremePriorityEnemyFactionId: null,
     totalTributeEarned: 0,
@@ -185,11 +199,35 @@ export function normalizeFactionCommand(raw: unknown): FactionCommandState {
         }
       : null;
 
+  const rank3Choice: Rank3WarAbilityChoice | null =
+    obj.rank3Choice === 'esquadrao' || obj.rank3Choice === 'coleta' ? obj.rank3Choice : null;
+  const squadronShipUids = Array.isArray(obj.squadronShipUids)
+    ? Array.from(new Set(obj.squadronShipUids.filter((id): id is string => typeof id === 'string' && id.length > 0))).slice(0, 3)
+    : [];
+  const rawCol = obj.resourceCollection;
+  const resourceCollection: Rank3ResourceCollectionState | null =
+    rawCol &&
+    typeof rawCol === 'object' &&
+    typeof rawCol.resourceId === 'string' &&
+    rawCol.resourceId.length > 0 &&
+    Array.isArray(rawCol.shipUids)
+      ? {
+          resourceId: rawCol.resourceId,
+          shipUids: Array.from(
+            new Set(rawCol.shipUids.filter((id): id is string => typeof id === 'string' && id.length > 0))
+          ).slice(0, 3),
+          factionId: typeof rawCol.factionId === 'string' ? rawCol.factionId : '',
+        }
+      : null;
+
   return {
     supremeCaptainFactionIds,
     lastOffensiveCycle: Number.isFinite(obj.lastOffensiveCycle) ? Number(obj.lastOffensiveCycle) : undefined,
     lastDiplomacyCycle: Number.isFinite(obj.lastDiplomacyCycle) ? Number(obj.lastDiplomacyCycle) : undefined,
     activePatrol,
+    rank3Choice,
+    squadronShipUids,
+    resourceCollection,
     supremeColonizeSystemId:
       typeof obj.supremeColonizeSystemId === 'string' && obj.supremeColonizeSystemId
         ? obj.supremeColonizeSystemId
@@ -479,6 +517,226 @@ export function dispatchReserveShipPatrol(
           campaign.gameTimeSeconds
         ),
       ],
+    },
+  };
+}
+
+const STRATEGIC_RARITIES = new Set<ResourceDef['rarity']>(['raro', 'épico', 'lendário']);
+const RARITY_SORT_ORDER: Record<ResourceDef['rarity'], number> = {
+  lendário: 0,
+  épico: 1,
+  raro: 2,
+  incomum: 3,
+  comum: 4,
+};
+
+export function getRank3CollectibleResources(
+  campaign: PlayerCampaignState,
+  factionId: string = campaign.chosenFactionId
+): Array<{ resource: ResourceDef; planetCount: number }> {
+  const ownedSystems = getFactionOwnedSystems(factionId, campaign);
+  const planetSets = new Map<string, Set<string>>();
+
+  for (const sysSummary of ownedSystems) {
+    const full = generateSolarSystem(sysSummary);
+    for (const planet of full.planets) {
+      const lv = campaign.planetOverrides?.[planet.id]?.level ?? planet.level;
+      if (lv < 0) continue;
+      for (const dep of planet.deposits) {
+        const res = RESOURCES_BY_ID[dep.resourceId];
+        if (!res || !STRATEGIC_RARITIES.has(res.rarity)) continue;
+        let set = planetSets.get(res.id);
+        if (!set) {
+          set = new Set<string>();
+          planetSets.set(res.id, set);
+        }
+        set.add(planet.id);
+      }
+    }
+  }
+
+  return RESOURCES.filter((r) => STRATEGIC_RARITIES.has(r.rarity))
+    .map((resource) => ({
+      resource,
+      planetCount: planetSets.get(resource.id)?.size ?? 0,
+    }))
+    .sort((a, b) => {
+      if ((b.planetCount > 0 ? 1 : 0) !== (a.planetCount > 0 ? 1 : 0)) {
+        return (b.planetCount > 0 ? 1 : 0) - (a.planetCount > 0 ? 1 : 0);
+      }
+      if (b.planetCount !== a.planetCount) return b.planetCount - a.planetCount;
+      const ra = RARITY_SORT_ORDER[a.resource.rarity] ?? 9;
+      const rb = RARITY_SORT_ORDER[b.resource.rarity] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return a.resource.name.localeCompare(b.resource.name, 'pt-BR');
+    });
+}
+
+export function chooseRank3WarMode(
+  campaign: PlayerCampaignState,
+  mode: Rank3WarAbilityChoice
+): { ok: boolean; state: PlayerCampaignState; message: string } {
+  const rankInfo = getPlayerFactionRank(campaign);
+  if (rankInfo.current.rank < 3) {
+    return {
+      ok: false,
+      state: campaign,
+      message: 'Requer Patente 3 (Capitão de Esquadrão · 100 Renome).',
+    };
+  }
+  const cmd = normalizeFactionCommand(campaign.factionCommand);
+  const nextCmd: FactionCommandState = {
+    ...cmd,
+    rank3Choice: mode,
+  };
+  const label =
+    mode === 'esquadrao'
+      ? 'Modo de Patente 3 definido para Esquadrão de Escolta (até 3 naves seguindo você).'
+      : 'Modo de Patente 3 definido para Coleta Estratégica de Recursos nos sistemas da facção.';
+  return {
+    ok: true,
+    message: label,
+    state: {
+      ...campaign,
+      factionCommand: nextCmd,
+    },
+  };
+}
+
+export function toggleSquadronShip(
+  campaign: PlayerCampaignState,
+  shipUid: string
+): { ok: boolean; state: PlayerCampaignState; message: string } {
+  const rankInfo = getPlayerFactionRank(campaign);
+  if (rankInfo.current.rank < 3) {
+    return {
+      ok: false,
+      state: campaign,
+      message: 'Requer Patente 3 (Capitão de Esquadrão · 100 Renome).',
+    };
+  }
+  if (shipUid === campaign.activeShipUid) {
+    return { ok: false, state: campaign, message: 'A nave que você pilota já lidera o esquadrão.' };
+  }
+  const ship = campaign.ships.find((s) => s.uid === shipUid);
+  if (!ship) {
+    return { ok: false, state: campaign, message: 'Nave reserva não encontrada.' };
+  }
+  const cmd = normalizeFactionCommand(campaign.factionCommand);
+  if (cmd.activePatrol?.shipUid === shipUid) {
+    return { ok: false, state: campaign, message: 'Esta nave está finalizando uma patrulha neste ciclo.' };
+  }
+
+  const currentList = (cmd.squadronShipUids ?? []).filter(
+    (id) => id !== campaign.activeShipUid && campaign.ships.some((s) => s.uid === id)
+  );
+  const exists = currentList.includes(shipUid);
+  let nextList: string[];
+  if (exists) {
+    nextList = currentList.filter((id) => id !== shipUid);
+  } else {
+    if (currentList.length >= 3) {
+      return {
+        ok: false,
+        state: campaign,
+        message: 'O Esquadrão comporta no máximo 3 naves vinculadas.',
+      };
+    }
+    nextList = [...currentList, shipUid];
+  }
+
+  const nextCollection = cmd.resourceCollection
+    ? {
+        ...cmd.resourceCollection,
+        shipUids: cmd.resourceCollection.shipUids.filter((id) => !nextList.includes(id)),
+      }
+    : null;
+
+  const shipLv = computeShipTechLevel(ship);
+  return {
+    ok: true,
+    message: exists
+      ? `${ship.customName} removida do Esquadrão.`
+      : `${ship.customName} (Nível ${shipLv}) vinculada ao Esquadrão: +${shipLv}% em Ataque e Escudo!`,
+    state: {
+      ...campaign,
+      factionCommand: {
+        ...cmd,
+        rank3Choice: 'esquadrao',
+        squadronShipUids: nextList,
+        resourceCollection: nextCollection && nextCollection.shipUids.length > 0 ? nextCollection : null,
+      },
+    },
+  };
+}
+
+export function configureResourceCollection(
+  campaign: PlayerCampaignState,
+  shipUids: string[],
+  resourceId: string
+): { ok: boolean; state: PlayerCampaignState; message: string } {
+  const rankInfo = getPlayerFactionRank(campaign);
+  if (rankInfo.current.rank < 3) {
+    return {
+      ok: false,
+      state: campaign,
+      message: 'Requer Patente 3 (Capitão de Esquadrão · 100 Renome).',
+    };
+  }
+  const resDef = RESOURCES_BY_ID[resourceId];
+  if (!resDef || !STRATEGIC_RARITIES.has(resDef.rarity)) {
+    return {
+      ok: false,
+      state: campaign,
+      message: 'Escolha 1 recurso raro, épico ou lendário para a coleta da facção.',
+    };
+  }
+  const cmd = normalizeFactionCommand(campaign.factionCommand);
+  const validUids = Array.from(
+    new Set(
+      shipUids.filter(
+        (id) =>
+          id !== campaign.activeShipUid &&
+          id !== cmd.activePatrol?.shipUid &&
+          campaign.ships.some((s) => s.uid === id)
+      )
+    )
+  ).slice(0, 3);
+
+  const nextSquadron = (cmd.squadronShipUids ?? []).filter((id) => !validUids.includes(id));
+  const nextCollection: Rank3ResourceCollectionState | null =
+    validUids.length > 0
+      ? {
+          resourceId,
+          shipUids: validUids,
+          factionId: campaign.chosenFactionId,
+        }
+      : {
+          resourceId,
+          shipUids: [],
+          factionId: campaign.chosenFactionId,
+        };
+
+  const divisor = validUids.length >= 3 ? 1 : validUids.length === 2 ? 2 : 3;
+  const planetCount =
+    getRank3CollectibleResources(campaign, campaign.chosenFactionId).find((r) => r.resource.id === resourceId)
+      ?.planetCount ?? 0;
+  const estYield = validUids.length > 0 ? Math.floor(planetCount / divisor) : 0;
+
+  return {
+    ok: true,
+    message:
+      validUids.length > 0
+        ? `Coleta Estratégica configurada: ${validUids.length} nave(s) buscando ${resDef.name} (${estYield} un./ciclo).`
+        : `Alvo de coleta alterado para ${resDef.name}. Vincule 1 a 3 naves reservas para iniciar a coleta.`,
+    state: {
+      ...campaign,
+      factionCommand: {
+        ...cmd,
+        rank3Choice: 'coleta',
+        squadronShipUids: nextSquadron,
+        resourceCollection: nextCollection,
+      },
     },
   };
 }
@@ -804,6 +1062,85 @@ export function resolveCycleRankEconomyAndPatrol(
       ).nextCampaign;
     }
     nextPatrol = null;
+  }
+
+  // 3. Resolve Rank 3 Strategic Resource Collection
+  if (
+    rankInfo.current.rank >= 3 &&
+    cmd.rank3Choice === 'coleta' &&
+    cmd.resourceCollection &&
+    cmd.resourceCollection.shipUids.length > 0
+  ) {
+    const col = cmd.resourceCollection;
+    const activeUids = col.shipUids.filter(
+      (uid) => uid !== updatedState.activeShipUid && updatedState.ships.some((s) => s.uid === uid)
+    ).slice(0, 3);
+    const resDef = RESOURCES_BY_ID[col.resourceId];
+    if (activeUids.length > 0 && resDef) {
+      const targetFactionId = rankInfo.factionId;
+      const planetCount =
+        getRank3CollectibleResources(updatedState, targetFactionId).find((r) => r.resource.id === resDef.id)
+          ?.planetCount ?? 0;
+      const divisor = activeUids.length >= 3 ? 1 : activeUids.length === 2 ? 2 : 3;
+      const yieldQty = Math.floor(planetCount / divisor);
+
+      if (yieldQty > 0) {
+        const curFree =
+          activeShip && shipStats
+            ? Math.max(0, shipStats.cargoCapacity - compartmentUsed(updatedState, activeShip))
+            : 0;
+        const cargoRes = addCargoStack(updatedState.cargo, resDef.id, yieldQty, curFree);
+        const overflowQty = yieldQty - cargoRes.added;
+        let nextVault = normalizeFactionVault(updatedState.factionVault);
+        if (overflowQty > 0) {
+          const vIdx = nextVault.resources.findIndex((r) => r.resourceId === resDef.id);
+          nextVault = {
+            ...nextVault,
+            resources:
+              vIdx >= 0
+                ? nextVault.resources.map((r, i) => (i === vIdx ? { ...r, qty: r.qty + overflowQty } : r))
+                : [...nextVault.resources, { resourceId: resDef.id, qty: overflowQty, avgCostPaid: 0 }],
+          };
+        }
+        const colMsg =
+          overflowQty > 0
+            ? `Ciclo ${nextCycle}: Frota de Coleta (${activeUids.length} nave${activeUids.length > 1 ? 's' : ''}) extraiu ${yieldQty}× ${resDef.name} (${cargoRes.added} na carga, ${overflowQty} no Cofre da Facção).`
+            : `Ciclo ${nextCycle}: Frota de Coleta (${activeUids.length} nave${activeUids.length > 1 ? 's' : ''}) entregou +${cargoRes.added}× ${resDef.name} ao compartimento.`;
+        updatedState = {
+          ...updatedState,
+          cargo: cargoRes.nextCargo,
+          factionVault: nextVault,
+          logbook: [...updatedState.logbook, makeRankLog('comercio', colMsg, campaign.gameTimeSeconds)],
+        };
+        announcements.push(colMsg);
+      } else {
+        const zeroMsg = `Ciclo ${nextCycle}: Frota de Coleta (${activeUids.length} nave${activeUids.length > 1 ? 's' : ''}) não atingiu cota mínima de ${resDef.name} (${planetCount} planeta(s) ÷ ${divisor} = 0).`;
+        updatedState = {
+          ...updatedState,
+          logbook: [...updatedState.logbook, makeRankLog('comercio', zeroMsg, campaign.gameTimeSeconds)],
+        };
+      }
+    }
+  }
+
+  // 4. Per-cycle Crew Equipment Maintenance Cost
+  const crewMaint = computeCrewEquipmentMaintenance(updatedState);
+  if (crewMaint.totalCost > 0) {
+    const balance = Number.isFinite(updatedState.credits) ? updatedState.credits : 0;
+    const paid = Math.min(Math.max(0, balance), crewMaint.totalCost);
+    const noun = crewMaint.itemCount === 1 ? 'equipamento' : 'equipamentos';
+    const maintMsg =
+      paid >= crewMaint.totalCost
+        ? `Ciclo ${nextCycle}: manutenção de ${crewMaint.itemCount} ${noun} da tripulação custou -${paid} cr.`
+        : paid > 0
+          ? `Ciclo ${nextCycle}: manutenção da tripulação cobrou ${paid} de ${crewMaint.totalCost} cr (${crewMaint.itemCount} ${noun}).`
+          : `Ciclo ${nextCycle}: sem créditos para a manutenção de ${crewMaint.totalCost} cr da tripulação (${crewMaint.itemCount} ${noun}).`;
+    updatedState = {
+      ...updatedState,
+      credits: balance - paid,
+      logbook: [...updatedState.logbook, makeRankLog('comercio', maintMsg, campaign.gameTimeSeconds)],
+    };
+    announcements.push(maintMsg);
   }
 
   return {

@@ -1,6 +1,6 @@
-import type { OwnedShip, PlayerCampaignState } from '../types/game';
+import type { InventoryItemRecord, OwnedShip, PlayerCampaignState } from '../types/game';
 import { FACTIONS, FACTIONS_BY_ID, getFactionDistanceLy, SPECIES_BY_ID } from '../data/lifeforms';
-import { HULLS_BY_ID } from '../data/items';
+import { EXTRACTORS_BY_ID, HULLS_BY_ID, SUIT_GEAR_BY_ID } from '../data/items';
 import { generateSolarSystem, getSystemSummaryById } from '../data/universe';
 import {
   buildGalacticWarsFromActiveMap,
@@ -9,6 +9,7 @@ import {
 } from './galacticWar';
 import { DEFAULT_ORIGIN_BONUSES } from '../data/originPerks';
 import { createDefaultCharacterProgress, normalizeCharacterProgress } from './character';
+import { isCrewEquipableItem, isManualExtractor, isShipExtractor } from './combat';
 import { normalizeFactionVault } from './factionVault';
 import { emptyFactionCommand, normalizeFactionCommand } from './factionRanks';
 
@@ -51,7 +52,12 @@ function sanitizePlanetSales(raw: unknown): Record<string, Record<string, number
 const SAVE_KEY = 'horizonte_estelar_campaign_v1';
 export const CURRENT_SAVE_VERSION = 1;
 
-export function createStarterCampaign(speciesId: string, factionId: string, playerName: string): PlayerCampaignState {
+export function createStarterCampaign(
+  speciesId: string,
+  factionId: string,
+  playerName: string,
+  playerGender: 'M' | 'F' = 'M'
+): PlayerCampaignState {
   const fac = FACTIONS_BY_ID[factionId] ?? FACTIONS[0];
   const sp = SPECIES_BY_ID[speciesId] ?? SPECIES_BY_ID[fac.speciesId];
   const startSysSummary = getSystemSummaryById(fac.capitalSystemId)!;
@@ -79,9 +85,9 @@ export function createStarterCampaign(speciesId: string, factionId: string, play
     weaponId: 'laser_civil_mk1',
     shieldIds: [],
     jumpDriveId: 'motor_curto_mk1',
-    extractorIds: ['broca_mineral_basica'],
+    extractorIds: [],
     utilityIds: ['rebocador_carga_mk1'],
-    suitGearIds: ['lanterna_tatica'],
+    suitGearIds: [],
     depot: [],
   };
 
@@ -96,6 +102,7 @@ export function createStarterCampaign(speciesId: string, factionId: string, play
     version: CURRENT_SAVE_VERSION,
     started: true,
     playerName: playerName.trim() || 'Viajante',
+    playerGender,
     chosenSpeciesId: sp.id,
     chosenFactionId: fac.id,
     character: createDefaultCharacterProgress(),
@@ -135,6 +142,21 @@ export function createStarterCampaign(speciesId: string, factionId: string, play
     },
     blueprintsOwned: [],
     crew: [],
+    crewEquipment: [
+      {
+        uid: 'crew_init_lanterna',
+        category: 'suit',
+        itemId: 'lanterna_tatica',
+        avgCostPaid: SUIT_GEAR_BY_ID['lanterna_tatica']?.price ?? 100,
+      },
+      {
+        uid: 'crew_init_broca',
+        category: 'extractor',
+        itemId: 'broca_mineral_basica',
+        avgCostPaid: EXTRACTORS_BY_ID['broca_mineral_basica']?.price ?? 100,
+      },
+    ],
+    hiredCrewCandidateIds: [],
     missions: [],
     logbook: [
       {
@@ -191,11 +213,98 @@ export function validateAndMigrateSave(raw: unknown): PlayerCampaignState | null
       : buildGalacticWarsFromActiveMap(rawActiveWars);
   const syncedWarsMap = syncActiveWarsMap(migratedWars);
 
+  const migratedCrewEquipment: InventoryItemRecord[] = [];
+  if (Array.isArray(obj.crewEquipment)) {
+    for (const rawItem of obj.crewEquipment) {
+      if (!rawItem || typeof rawItem !== 'object') continue;
+      const rec = rawItem as Partial<InventoryItemRecord>;
+      if (
+        (rec.category === 'suit' || rec.category === 'extractor') &&
+        typeof rec.itemId === 'string' &&
+        isCrewEquipableItem(rec.category, rec.itemId)
+      ) {
+        migratedCrewEquipment.push({
+          uid:
+            typeof rec.uid === 'string' && rec.uid
+              ? rec.uid
+              : `creweq_${migratedCrewEquipment.length}_${rec.itemId}`,
+          category: rec.category,
+          itemId: rec.itemId,
+          avgCostPaid: Number.isFinite(rec.avgCostPaid) ? Number(rec.avgCostPaid) : 0,
+        });
+      }
+    }
+  }
+
+  const migratedShips: OwnedShip[] = obj.ships.map((s, shipIdx) => {
+    const hullDef = HULLS_BY_ID[s.hullId];
+    const fId = s.factionId ?? hullDef?.factionExclusiveId ?? obj.chosenFactionId;
+    const shipColor = (fId ? FACTIONS_BY_ID[fId]?.color : undefined) ?? '#38bdf8';
+    const scaledHull = (obj.lifeScale ?? 1) < 3 ? Math.round((s.currentHull ?? 0) * 3) : (s.currentHull ?? 0);
+    const cap = hullDef?.maxHull ?? scaledHull;
+
+    const rawDepot = Array.isArray(s.depot) ? [...s.depot] : [];
+
+    // Migrate legacy ship suitGearIds -> campaign crewEquipment
+    const legacySuits = Array.isArray(s.suitGearIds) ? s.suitGearIds : [];
+    legacySuits.forEach((suitId, idx) => {
+      if (typeof suitId === 'string' && SUIT_GEAR_BY_ID[suitId]) {
+        migratedCrewEquipment.push({
+          uid: `mig_suit_${shipIdx}_${idx}_${suitId}`,
+          category: 'suit',
+          itemId: suitId,
+          avgCostPaid: SUIT_GEAR_BY_ID[suitId]?.price ?? 0,
+        });
+      }
+    });
+
+    // Separate manual extractors (move to crewEquipment) vs ship extractors (cap to min(2, extractionSlots))
+    const rawExtractors = Array.isArray(s.extractorIds) ? s.extractorIds : [];
+    const maxShipExtractors = Math.min(2, Math.max(0, hullDef?.extractionSlots ?? 2));
+    const keptShipExtractors: string[] = [];
+    rawExtractors.forEach((exId, idx) => {
+      if (typeof exId !== 'string') return;
+      if (isManualExtractor(exId)) {
+        migratedCrewEquipment.push({
+          uid: `mig_ext_${shipIdx}_${idx}_${exId}`,
+          category: 'extractor',
+          itemId: exId,
+          avgCostPaid: EXTRACTORS_BY_ID[exId]?.price ?? 0,
+        });
+      } else if (isShipExtractor(exId)) {
+        if (keptShipExtractors.length < maxShipExtractors) {
+          keptShipExtractors.push(exId);
+        } else {
+          rawDepot.push({
+            uid: `mig_dep_ext_${shipIdx}_${idx}_${exId}`,
+            category: 'extractor',
+            itemId: exId,
+            avgCostPaid: EXTRACTORS_BY_ID[exId]?.price ?? 0,
+          });
+        }
+      }
+    });
+
+    return {
+      ...s,
+      factionId: fId,
+      color: shipColor,
+      currentHull: Math.max(1, Math.min(cap, scaledHull)),
+      jumpDriveId: typeof s.jumpDriveId === 'string' ? s.jumpDriveId : 'motor_curto_mk1',
+      depot: rawDepot,
+      suitGearIds: [],
+      shieldIds: Array.isArray(s.shieldIds) ? s.shieldIds : [],
+      extractorIds: keptShipExtractors,
+      utilityIds: Array.isArray(s.utilityIds) ? s.utilityIds : [],
+    };
+  });
+
   // Migrate missing arrays/fields from older save formats safely
   return {
     version: CURRENT_SAVE_VERSION,
     started: obj.started ?? true,
     playerName: typeof obj.playerName === 'string' ? obj.playerName : 'Viajante',
+    playerGender: obj.playerGender === 'F' ? 'F' : 'M',
     chosenSpeciesId: obj.chosenSpeciesId ?? 'solarianos',
     chosenFactionId: obj.chosenFactionId,
     character: normalizeCharacterProgress(obj.character),
@@ -224,30 +333,14 @@ export function validateAndMigrateSave(raw: unknown): PlayerCampaignState | null
     planetOverrides: obj.planetOverrides && typeof obj.planetOverrides === 'object' ? obj.planetOverrides : {},
     phenomenonCooldowns: obj.phenomenonCooldowns && typeof obj.phenomenonCooldowns === 'object' ? obj.phenomenonCooldowns : {},
     clearedHazards: Array.isArray(obj.clearedHazards) ? obj.clearedHazards.filter((id) => typeof id === 'string') : [],
-    ships: obj.ships.map((s) => {
-      const hullDef = HULLS_BY_ID[s.hullId];
-      const fId = s.factionId ?? hullDef?.factionExclusiveId ?? obj.chosenFactionId;
-      const shipColor = (fId ? FACTIONS_BY_ID[fId]?.color : undefined) ?? '#38bdf8';
-      const scaledHull = (obj.lifeScale ?? 1) < 3 ? Math.round((s.currentHull ?? 0) * 3) : (s.currentHull ?? 0);
-      const cap = hullDef?.maxHull ?? scaledHull;
-      return {
-        ...s,
-        factionId: fId,
-        color: shipColor,
-        currentHull: Math.max(1, Math.min(cap, scaledHull)),
-        jumpDriveId: typeof s.jumpDriveId === 'string' ? s.jumpDriveId : 'motor_curto_mk1',
-        depot: Array.isArray(s.depot) ? s.depot : [],
-        suitGearIds: Array.isArray(s.suitGearIds) ? s.suitGearIds : [],
-        shieldIds: Array.isArray(s.shieldIds) ? s.shieldIds : [],
-        extractorIds: Array.isArray(s.extractorIds) ? s.extractorIds : [],
-        utilityIds: Array.isArray(s.utilityIds) ? s.utilityIds : [],
-      };
-    }),
+    ships: migratedShips,
     activeShipUid: obj.activeShipUid ?? obj.ships[0].uid,
     cargo: Array.isArray(obj.cargo) ? obj.cargo : [],
     consumables: obj.consumables && typeof obj.consumables === 'object' ? obj.consumables : {},
     blueprintsOwned: Array.isArray(obj.blueprintsOwned) ? obj.blueprintsOwned : [],
     crew: Array.isArray(obj.crew) ? obj.crew : [],
+    crewEquipment: migratedCrewEquipment,
+    hiredCrewCandidateIds: sanitizeIdList(obj.hiredCrewCandidateIds),
     missions: Array.isArray(obj.missions) ? obj.missions : [],
     logbook: Array.isArray(obj.logbook) ? obj.logbook : [],
     gameTimeSeconds: Number.isFinite(obj.gameTimeSeconds) ? Number(obj.gameTimeSeconds) : 0,

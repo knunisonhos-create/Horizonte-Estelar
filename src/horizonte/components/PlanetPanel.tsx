@@ -100,13 +100,35 @@ import {
   compartmentUsed,
   computeCrewBonuses,
   computeCrewHarmony,
+  computeCrewMemberSupplyPerMin,
   computeShipDerivedStats,
   crewHealthRatio,
+  getCrewItemMaintenancePerCycle,
+  getCrewManualExtractorIds,
+  getCrewSuitIds,
   getEffectiveExtractorRate,
   getEffectiveRoleSkill,
+  isCrewEquipableItem,
+  isManualExtractor,
+  isShipExtractor,
   TECH_SYNERGY_BONUS,
 } from '../engine/combat';
-import { formatTablePct, planetResourceMaxStock, quoteSale, resourceSupplyBand, tableDeltaPct, unitBuyPrice } from '../engine/market';
+import {
+  blueprintStockKey,
+  consumableStockKey,
+  equipmentStockKey,
+  formatTablePct,
+  hullStockKey,
+  planetBlueprintRemainingStock,
+  planetConsumableRemainingStock,
+  planetEquipmentRemainingStock,
+  planetHullRemainingStock,
+  planetResourceMaxStock,
+  quoteSale,
+  resourceSupplyBand,
+  tableDeltaPct,
+  unitBuyPrice,
+} from '../engine/market';
 import { computePlanetPopulation, pickSpeciesFromPopulation } from '../engine/population';
 import { neededResourceIds } from '../engine/resourceNeeds';
 import {
@@ -335,6 +357,55 @@ function MarketRow({
   );
 }
 
+function TradeSectionContainer({
+  title,
+  icon,
+  count,
+  isOpen,
+  onToggle,
+  children,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  count: number;
+  isOpen: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/60 overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900/75">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex-1 min-w-0 flex items-center gap-2 text-left cursor-pointer"
+        >
+          {icon}
+          <span className="font-semibold text-xs text-slate-200 truncate">{title}</span>
+          <span className="text-[11px] font-mono-tabular text-slate-400 shrink-0">({count})</span>
+        </button>
+        <button
+          type="button"
+          onClick={onToggle}
+          className={`px-2 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 shrink-0 cursor-pointer transition-colors ${
+            isOpen
+              ? 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-200'
+              : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-300'
+          }`}
+        >
+          <span>{isOpen ? 'Fechar' : 'Abrir'}</span>
+          {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </button>
+      </div>
+      {isOpen && (
+        <div className="p-2.5 space-y-1.5 border-t border-slate-800/80">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const MISSION_TYPE_ICON: Record<MissionType, React.ReactNode> = {
   entrega_comercio: <Package className="w-3.5 h-3.5 text-cyan-400 shrink-0" />,
   coleta_raro: <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
@@ -459,6 +530,7 @@ interface PlanetPanelProps {
   onExtractGround: (planet: PlanetData, depositId: string) => void;
   onRevealExistence: (planet: PlanetData) => void;
   onBombardPlanet: (planet: PlanetData) => void;
+  bombardCooldownSec?: number;
   onBuyExtractionLicense: () => void;
   onCreateHeadquarters: (planet: PlanetData, targetFactionId: string) => void;
   onAcceptMission: (mission: Mission) => void;
@@ -511,6 +583,7 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
   onExtractGround,
   onRevealExistence,
   onBombardPlanet,
+  bombardCooldownSec = 0,
   onBuyExtractionLicense,
   onCreateHeadquarters,
   onAcceptMission,
@@ -542,6 +615,11 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
   const [tradeMode, setTradeMode] = useState<'comprar' | 'vender'>('comprar');
   const [selectedHqFactionId, setSelectedHqFactionId] = useState<string>('');
   const [coverFailed, setCoverFailed] = useState(false);
+  const [openTradeSections, setOpenTradeSections] = useState<Record<string, boolean>>({});
+
+  const toggleTradeSection = (key: string) => {
+    setOpenTradeSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const isOrbitingCurrent = Boolean(planet && campaign.orbitingPlanetId === planet.id);
 
@@ -552,7 +630,12 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
     setTradeMode('comprar');
     setCoverFailed(false);
     setInfoCollapsed(false);
+    setOpenTradeSections({});
   }, [planet?.id, isOrbitingCurrent, onTabChange]);
+
+  useEffect(() => {
+    setOpenTradeSections({});
+  }, [tradeMode, marketMode, cardTab]);
 
   useEffect(() => {
     if (!tutorialSync) return;
@@ -635,7 +718,7 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
               </div>
             )}
             <span className={`px-2 py-1 rounded border font-mono-tabular text-[11px] font-semibold ${reqLevelStyle.badge}`}>
-              Extrator de tecnologia nível {phenomenon.minTechTier} ou superior (sua nave: nível {shipMaxTech})
+              Extrator de nave de tecnologia nível {phenomenon.minTechTier} ou superior (sua nave: nível {shipMaxTech})
             </span>
           </div>
           {phenomenon.kind === 'cometa_errante' && (
@@ -794,14 +877,15 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
     Math.ceil((overrides.lastNpcTalkAt ?? -9999) + 60 - campaign.gameTimeSeconds)
   );
 
-  const equippedSuitGear = activeShip.suitGearIds.map((id) => SUIT_GEAR_BY_ID[id]).filter(Boolean);
+  const crewSuitIds = getCrewSuitIds(campaign);
+  const equippedSuitGear = crewSuitIds.map((id) => SUIT_GEAR_BY_ID[id]).filter(Boolean);
   const equippedWeapon = activeShip.weaponId ? WEAPONS_BY_ID[activeShip.weaponId] : null;
   const equippedJumpDrive = JUMP_DRIVES_BY_ID[activeShip.jumpDriveId];
   const primaryShield = activeShip.shieldIds[0] ? SHIELDS_BY_ID[activeShip.shieldIds[0]] : null;
 
   const riskInfo = evaluatePlanetConditionRisk(
     riskPlanet,
-    activeShip.suitGearIds,
+    crewSuitIds,
     bonuses.explorerBonus,
     bonuses.hazardResistBonus
   );
@@ -860,7 +944,7 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
       const minSkill = actualLevel === 5 ? 48 : actualLevel === 4 ? 28 : 12;
       const maxSkill = actualLevel === 5 ? 98 : actualLevel === 4 ? 76 : 55;
       const skill = rng.int(minSkill, maxSkill);
-      const hireCost = Math.round((80 + skill * 14) * bonuses.supplyCostMult);
+      const hireCost = Math.round((80 + skill * 14) * Math.max(0.35, bonuses.supplyCostMult));
       const firstNames = ['Vael', 'Toren', 'Kira', 'Soren', 'Nyx', 'Dax', 'Mira', 'Zel', 'Orin', 'Luma'];
       list.push({
         id: `cand_${planet.id}_${i}_${skill}`,
@@ -872,7 +956,9 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
         status: 'ativo',
       });
     }
-    return list;
+    const hiredSet = new Set(campaign.hiredCrewCandidateIds ?? []);
+    const crewIdSet = new Set(campaign.crew.map((c) => c.id));
+    return list.filter((cand) => !hiredSet.has(cand.id) && !crewIdSet.has(cand.id));
   }, [
     actualLevel,
     planet.id,
@@ -884,6 +970,8 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
     planet.lifeFormId,
     planet.hasExtractorColony,
     campaign.chosenSpeciesId,
+    campaign.hiredCrewCandidateIds,
+    campaign.crew,
     bonuses.supplyCostMult,
     Math.floor(campaign.gameTimeSeconds / 180),
   ]);
@@ -928,6 +1016,8 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
       (rarityRank(s.rarity) <= rarityMaxRank || (isFactionMatch(s.factionStyle) && rarityRank(s.rarity) <= rarityMaxRank + 1))
   );
   const marketExtractors = EXTRACTORS.filter((e) => isOriginAccessible(e) && rarityRank(e.rarity) <= rarityMaxRank + 1);
+  const marketShipExtractors = marketExtractors.filter((e) => e.extractorScope === 'nave');
+  const marketManualExtractors = marketExtractors.filter((e) => e.extractorScope === 'manual');
   const marketUtilities = UTILITY_MODULES.filter((u) => isOriginAccessible(u) && rarityRank(u.rarity) <= rarityMaxRank + 1);
   const marketDrives = JUMP_DRIVES.filter((j) => rarityRank(j.rarity) <= rarityMaxRank);
   const marketSuit = SUIT_GEAR.filter((g) => isOriginAccessible(g) && rarityRank(g.rarity) <= rarityMaxRank + 1);
@@ -982,7 +1072,7 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
       label: 'Comercializar e Estaleiro',
       icon: <ShoppingCart className="w-3.5 h-3.5" />,
       accent: 'border-indigo-500/45 text-indigo-200 bg-indigo-500/15',
-      visible: isScanned && actualLevel >= 1,
+      visible: isScanned && actualLevel >= 3,
     },
     {
       id: 'conversar',
@@ -1992,11 +2082,15 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                     {groundDeposits.map((d) => {
                       const r = RESOURCES_BY_ID[d.resourceId];
                       if (!r) return null;
-                      const tools = activeShip.extractorIds
+                      const combinedGroundExtractors = [
+                        ...activeShip.extractorIds,
+                        ...getCrewManualExtractorIds(campaign),
+                      ];
+                      const tools = combinedGroundExtractors
                         .map((id) => EXTRACTORS_BY_ID[id])
                         .filter((ex) => ex && ex.extractionClass === r.extractionClass);
                       const rate = getEffectiveExtractorRate(
-                        activeShip.extractorIds,
+                        combinedGroundExtractors,
                         r.extractionClass,
                         bonuses.activeTechCategory,
                         bonuses.minerRateMult,
@@ -2137,9 +2231,24 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
               </span>
             </div>
 
+            {bombardCooldownSec > 0 && (
+              <div className="bg-amber-950/35 border border-amber-500/45 rounded-lg p-2.5 space-y-1.5 text-[11px]">
+                <div className="flex items-center justify-between text-amber-200 font-semibold">
+                  <span>Recarga da Arma de Bombardeio</span>
+                  <span className="font-mono-tabular">{Math.ceil(bombardCooldownSec)}s / 60s</span>
+                </div>
+                <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-amber-400 transition-all"
+                    style={{ width: `${Math.min(100, Math.max(0, ((60 - bombardCooldownSec) / 60) * 100))}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
             <button
               type="button"
-              disabled={!inOrbit || !equippedWeapon?.canBombard}
+              disabled={!inOrbit || !equippedWeapon?.canBombard || bombardCooldownSec > 0}
               onClick={() => onBombardPlanet(planet)}
               className="w-full py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer"
             >
@@ -2148,10 +2257,12 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                 ? 'Entre em órbita para bombardear'
                 : !equippedWeapon?.canBombard
                 ? 'Equipe uma arma de Bombardeio Orbital'
+                : bombardCooldownSec > 0
+                ? `Recarregando bombardeio (${Math.ceil(bombardCooldownSec)}s)`
                 : `Executar Bombardeio Orbital em ${planet.name}`}
             </button>
           </div>
-        ) : effectiveTab === 'comercio_estaleiro' && actualLevel >= 1 ? (
+        ) : effectiveTab === 'comercio_estaleiro' && actualLevel >= 3 ? (
           <div className="space-y-3">
             {/* Switcher Mercado / Estaleiro */}
             <div className="grid grid-cols-2 gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
@@ -2224,517 +2335,718 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                 Entre em órbita de {planet.name} para comprar ou vender mercadorias, equipamentos, naves e projetos.
               </div>
             ) : tradeMode === 'vender' ? (
-              <div className="space-y-4">
-                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <span className="text-slate-300">
-                    Venda itens do seu compartimento de carga ou naves sobressalentes da frota.
-                  </span>
-                  <span className="font-mono-tabular text-slate-300">
-                    Compartimento livre: <strong className="text-cyan-300">{cargoFree} unidades</strong>
-                  </span>
-                </div>
+              (() => {
+                const sellResources = campaign.cargo
+                  .map((c) => ({ cargo: c, res: RESOURCES_BY_ID[c.resourceId] }))
+                  .filter((entry): entry is { cargo: typeof entry.cargo; res: NonNullable<typeof entry.res> } =>
+                    Boolean(entry.res && entry.cargo.qty > 0)
+                  );
+                const heldConsumables = Object.entries(campaign.consumables ?? {}).filter(
+                  ([id, qty]) => qty > 0 && Boolean(CONSUMABLES_BY_ID[id])
+                );
+                const getEquipTablePrice = (cat: InventoryItemRecord['category'], itemId: string): number => {
+                  if (cat === 'weapon') return WEAPONS_BY_ID[itemId]?.price ?? 0;
+                  if (cat === 'shield') return SHIELDS_BY_ID[itemId]?.price ?? 0;
+                  if (cat === 'jumpDrive') return JUMP_DRIVES_BY_ID[itemId]?.price ?? 0;
+                  if (cat === 'extractor') return EXTRACTORS_BY_ID[itemId]?.price ?? 0;
+                  if (cat === 'utility') return UTILITY_BY_ID[itemId]?.price ?? 0;
+                  return SUIT_GEAR_BY_ID[itemId]?.price ?? 0;
+                };
+                const sellGroupsByCategory = (
+                  cat: InventoryItemRecord['category'],
+                  itemFilter?: (itemId: string) => boolean
+                ) => {
+                  const groupsMap = new Map<string, { category: InventoryItemRecord['category']; itemId: string; uids: string[] }>();
+                  for (const dep of activeShip.depot) {
+                    if (dep.category !== cat) continue;
+                    if (itemFilter && !itemFilter(dep.itemId)) continue;
+                    const existing = groupsMap.get(dep.itemId);
+                    if (existing) existing.uids.push(dep.uid);
+                    else groupsMap.set(dep.itemId, { category: dep.category, itemId: dep.itemId, uids: [dep.uid] });
+                  }
+                  return Array.from(groupsMap.values());
+                };
+                const spareShips = campaign.ships.filter((s) => s.uid !== campaign.activeShipUid);
 
-                {/* Recursos do Compartimento */}
-                <div className="space-y-1.5">
-                  <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                    <Coins className="w-3.5 h-3.5 text-emerald-400" />
-                    Recursos no Compartimento
-                  </div>
-                  {campaign.cargo.filter((c) => c.qty > 0).length === 0 ? (
-                    <div className="text-slate-500 italic">Nenhum recurso no compartimento de carga.</div>
-                  ) : (
-                    campaign.cargo.map((c) => {
-                      const res = RESOURCES_BY_ID[c.resourceId];
-                      if (!res || c.qty <= 0) return null;
-                      const rStyle = RARITY_STYLES[res.rarity];
-                      const band = resourceSupplyBand(res.id, planet.id, system.planets);
-                      const already = campaign.planetSales?.[planet.id]?.[res.id] ?? 0;
-                      const resSellBonus = res.factionStyle === bonuses.activeTechCategory ? TECH_SYNERGY_BONUS.resourceSellPct : 0;
-                      const quote = quoteSale(res.basePrice, band, bonuses.tradePriceBonus + resSellBonus, already, c.qty, true);
-                      const pct = tableDeltaPct(quote.nextUnit, res.basePrice);
-                      return (
-                        <MarketRow
-                          key={c.resourceId}
-                          icon={<ResourceSprite resourceId={res.id} size={34} />}
-                          name={res.name}
-                          nameClass={rStyle.text}
-                          rarity={res.rarity}
-                          techCategory={res.factionStyle}
-                          activeTechCategory={bonuses.activeTechCategory}
-                          techBonusText="+15% venda"
-                          qty={c.qty}
-                          pct={pct}
-                          tone="venda"
-                          borderClass={rStyle.border}
-                          needed={neededResources.has(res.id)}
-                          detail={res.description}
-                          action={
-                            <span className="inline-flex gap-1">
-                              <button
-                                type="button"
-                                onClick={() => onSellResource(c.resourceId, 1)}
-                                className="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold cursor-pointer"
-                              >
-                                {quote.nextUnit} créditos
-                              </button>
-                              {c.qty > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => onSellResource(c.resourceId, c.qty)}
-                                  className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-semibold cursor-pointer"
-                                >
-                                  Tudo {quote.total} créditos
-                                </button>
-                              )}
-                            </span>
-                          }
-                        />
-                      );
-                    })
-                  )}
-                </div>
+                const sellEquipCategories: Array<{
+                  key: string;
+                  label: string;
+                  cat: InventoryItemRecord['category'];
+                  filter?: (itemId: string) => boolean;
+                  icon: React.ReactNode;
+                  emptyText: string;
+                }> = [
+                  {
+                    key: 'sell_weapon',
+                    label: 'Armas',
+                    cat: 'weapon',
+                    icon: <Crosshair className="w-3.5 h-3.5 text-rose-400 shrink-0" />,
+                    emptyText: 'Nenhuma arma no compartimento de carga.',
+                  },
+                  {
+                    key: 'sell_shield',
+                    label: 'Escudos',
+                    cat: 'shield',
+                    icon: <ShieldCheck className="w-3.5 h-3.5 text-sky-400 shrink-0" />,
+                    emptyText: 'Nenhum escudo no compartimento de carga.',
+                  },
+                  {
+                    key: 'sell_extractor_ship',
+                    label: 'Extratores de Nave (máx. 2/nave)',
+                    cat: 'extractor',
+                    filter: isShipExtractor,
+                    icon: <Pickaxe className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
+                    emptyText: 'Nenhum extrator de nave no compartimento de carga.',
+                  },
+                  {
+                    key: 'sell_extractor_manual',
+                    label: 'Extratores Manuais (Tripulação)',
+                    cat: 'extractor',
+                    filter: isManualExtractor,
+                    icon: <Pickaxe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />,
+                    emptyText: 'Nenhum extrator manual no compartimento de carga.',
+                  },
+                  {
+                    key: 'sell_jumpDrive',
+                    label: 'Motores',
+                    cat: 'jumpDrive',
+                    icon: <Navigation className="w-3.5 h-3.5 text-indigo-400 shrink-0" />,
+                    emptyText: 'Nenhum motor de salto no compartimento de carga.',
+                  },
+                  {
+                    key: 'sell_utility',
+                    label: 'Utilidades',
+                    cat: 'utility',
+                    icon: <Wrench className="w-3.5 h-3.5 text-cyan-400 shrink-0" />,
+                    emptyText: 'Nenhum módulo de utilidade no compartimento de carga.',
+                  },
+                  {
+                    key: 'sell_suit',
+                    label: 'Equipamentos da Tripulação (Trajes, Veículos & Tanques)',
+                    cat: 'suit',
+                    icon: <Footprints className="w-3.5 h-3.5 text-emerald-400 shrink-0" />,
+                    emptyText: 'Nenhum traje, veículo ou tanque no compartimento.',
+                  },
+                ];
 
-                {/* Consumíveis do Compartimento */}
-                <div className="space-y-1.5 pt-2 border-t border-slate-800">
-                  <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                    <Zap className="w-3.5 h-3.5 text-amber-400" />
-                    Consumíveis no Compartimento
-                  </div>
-                  {(() => {
-                    const heldConsumables = Object.entries(campaign.consumables ?? {}).filter(
-                      ([id, qty]) => qty > 0 && Boolean(CONSUMABLES_BY_ID[id])
-                    );
-                    if (heldConsumables.length === 0) {
-                      return <div className="text-slate-500 italic">Nenhum consumível no compartimento de carga.</div>;
-                    }
-                    return heldConsumables.map(([id, qty]) => {
-                      const con = CONSUMABLES_BY_ID[id];
-                      if (!con) return null;
-                      const table = con.id === 'mantimentos' ? 1 : con.price;
-                      const buyRef = Math.max(1, Math.round(table * priceMult));
-                      const rawSell = Math.max(1, Math.round(table * 0.65 * (1 + bonuses.tradePriceBonus)));
-                      const unitSell = table <= 1 ? 1 : Math.max(1, Math.min(buyRef > 1 ? buyRef - 1 : 1, rawSell));
-                      const pct = tableDeltaPct(unitSell, table);
-                      const totalSell = unitSell * qty;
-                      return (
-                        <MarketRow
-                          key={id}
-                          icon={<EquipmentSprite category="consumable" itemId={con.id} size={32} />}
-                          name={con.name}
-                          rarity={con.rarity ?? 'comum'}
-                          techCategory={con.factionStyle}
-                          activeTechCategory={bonuses.activeTechCategory}
-                          techBonusText="+35% efeito"
-                          qty={qty}
-                          pct={pct}
-                          tone="venda"
-                          detail={con.description}
-                          action={
-                            <span className="inline-flex gap-1">
-                              <button
-                                type="button"
-                                onClick={() => onSellConsumable(con.id, 1, unitSell)}
-                                className="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold cursor-pointer"
-                              >
-                                {unitSell} créditos
-                              </button>
-                              {qty > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => onSellConsumable(con.id, qty, unitSell)}
-                                  className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-semibold cursor-pointer"
-                                >
-                                  Tudo {totalSell.toLocaleString('pt-BR')} créditos
-                                </button>
-                              )}
-                            </span>
-                          }
-                        />
-                      );
-                    });
-                  })()}
-                </div>
-
-                {/* Equipamentos & Peças no Compartimento */}
-                <div className="space-y-1.5 pt-2 border-t border-slate-800">
-                  <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                    <Crosshair className="w-3.5 h-3.5 text-cyan-400" />
-                    Equipamentos & Peças no Compartimento
-                  </div>
-                  {(() => {
-                    if (activeShip.depot.length === 0) {
-                      return <div className="text-slate-500 italic">Nenhum equipamento ou peça no compartimento de carga.</div>;
-                    }
-                    const groupsMap = new Map<
-                      string,
-                      { category: InventoryItemRecord['category']; itemId: string; uids: string[] }
-                    >();
-                    for (const dep of activeShip.depot) {
-                      const key = `${dep.category}:${dep.itemId}`;
-                      const existing = groupsMap.get(key);
-                      if (existing) existing.uids.push(dep.uid);
-                      else groupsMap.set(key, { category: dep.category, itemId: dep.itemId, uids: [dep.uid] });
-                    }
-                    const getEquipTablePrice = (cat: InventoryItemRecord['category'], itemId: string): number => {
-                      if (cat === 'weapon') return WEAPONS_BY_ID[itemId]?.price ?? 0;
-                      if (cat === 'shield') return SHIELDS_BY_ID[itemId]?.price ?? 0;
-                      if (cat === 'jumpDrive') return JUMP_DRIVES_BY_ID[itemId]?.price ?? 0;
-                      if (cat === 'extractor') return EXTRACTORS_BY_ID[itemId]?.price ?? 0;
-                      if (cat === 'utility') return UTILITY_BY_ID[itemId]?.price ?? 0;
-                      return SUIT_GEAR_BY_ID[itemId]?.price ?? 0;
-                    };
-                    return Array.from(groupsMap.values()).map((grp) => {
-                      const meta = getEquipmentMeta(grp.category, grp.itemId);
-                      const rStyle = RARITY_STYLES[meta.rarity];
-                      const tablePrice = getEquipTablePrice(grp.category, grp.itemId);
-                      const styleDiscount = isFactionMatch(meta.factionStyle) ? 0.85 : 1.0;
-                      const buyRef = Math.max(50, Math.round(tablePrice * styleDiscount * priceMult));
-                      const rawSell = Math.max(25, Math.round(tablePrice * 0.68 * (1 + bonuses.tradePriceBonus)));
-                      const unitSell = Math.max(1, Math.min(buyRef > 1 ? buyRef - 1 : 1, rawSell));
-                      const pct = tableDeltaPct(unitSell, tablePrice);
-                      const count = grp.uids.length;
-                      const totalSell = unitSell * count;
-                      return (
-                        <MarketRow
-                          key={`${grp.category}:${grp.itemId}`}
-                          icon={<EquipmentSprite category={grp.category} itemId={grp.itemId} size={34} />}
-                          name={meta.name}
-                          nameClass={rStyle.text}
-                          rarity={meta.rarity}
-                          techCategory={meta.factionStyle}
-                          activeTechCategory={bonuses.activeTechCategory}
-                          qty={count}
-                          pct={pct}
-                          tone="venda"
-                          borderClass={rStyle.border}
-                          detail={
-                            <>
-                              <span className="font-mono-tabular text-cyan-300/90">{meta.statsLine}</span>
-                              {meta.description ? ` — ${meta.description}` : ''}
-                            </>
-                          }
-                          action={
-                            <span className="inline-flex gap-1">
-                              <button
-                                type="button"
-                                onClick={() => onSellDepotGear([grp.uids[0]], unitSell)}
-                                className="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold cursor-pointer"
-                              >
-                                {unitSell.toLocaleString('pt-BR')} créditos
-                              </button>
-                              {count > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => onSellDepotGear(grp.uids, unitSell)}
-                                  className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-semibold cursor-pointer"
-                                >
-                                  Tudo {totalSell.toLocaleString('pt-BR')} créditos
-                                </button>
-                              )}
-                            </span>
-                          }
-                        />
-                      );
-                    });
-                  })()}
-                </div>
-
-                {/* Naves Sobressalentes */}
-                <div className="space-y-2 pt-2 border-t border-slate-800">
-                  <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                    <Rocket className="w-3.5 h-3.5 text-rose-400" />
-                    Naves Sobressalentes
-                  </div>
-                  {campaign.ships.length <= 1 ? (
-                    <div className="text-slate-500 italic">
-                      Você possui apenas 1 nave (sua nave ativa não pode ser vendida).
+                return (
+                  <div className="space-y-2.5">
+                    <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <span className="text-slate-300">
+                        Venda itens do seu compartimento de carga ou naves sobressalentes da frota.
+                      </span>
+                      <span className="font-mono-tabular text-slate-300">
+                        Compartimento livre: <strong className="text-cyan-300">{cargoFree} unidades</strong>
+                      </span>
                     </div>
-                  ) : (
-                    campaign.ships
-                      .filter((s) => s.uid !== campaign.activeShipUid)
-                      .map((s) => {
-                        const hd = HULLS_BY_ID[s.hullId] ?? HULLS[0];
-                        if (!hd) return null;
-                        const hullBuyRef = Math.round(hd.price * priceMult);
-                        const rawSell = Math.round(hd.price * 0.72 * (1 + bonuses.tradePriceBonus));
-                        const sellVal = Math.max(
-                          100,
-                          Math.min(hullBuyRef > 100 ? hullBuyRef - 1 : hullBuyRef, rawSell)
-                        );
-                        const pct = tableDeltaPct(sellVal, hd.price);
-                        return (
-                          <div
-                            key={s.uid}
-                            className="flex items-center justify-between bg-slate-900/70 border border-slate-800 rounded-xl p-2 gap-2.5"
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <HullSprite hullId={s.hullId} size={34} />
-                              <div className="min-w-0">
-                                <div className="font-medium text-white truncate">
-                                  {s.customName} ({hd.name})
-                                </div>
-                                <div className="text-[11px] text-slate-300">
-                                  <PriceMark pct={pct} tone="venda" />
-                                </div>
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => onSellShip(s.uid, sellVal)}
-                              className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold shrink-0 cursor-pointer"
-                            >
-                              Vender ({sellVal.toLocaleString('pt-BR')} créditos)
-                            </button>
-                          </div>
-                        );
-                      })
-                  )}
-                </div>
-              </div>
-            ) : marketMode === 'comercio' ? (
-              <div className="space-y-4">
-                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <span className="text-slate-300">
-                    Cada porcentagem compara o preço com o valor de tabela.
-                  </span>
-                  <span className="font-mono-tabular text-slate-300">
-                    Compartimento livre: <strong className="text-cyan-300">{cargoFree} unidades</strong>
-                  </span>
-                </div>
 
-                {/* Consumíveis */}
-                <div className="space-y-1.5">
-                  <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                    <Zap className="w-3.5 h-3.5 text-amber-400" />
-                    Suprimentos & Consumíveis
-                  </div>
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {CONSUMABLES.filter((con) => isOriginAccessible(con)).map((con) => {
-                      const table = con.id === 'mantimentos' ? 1 : con.price;
-                      const p = Math.max(1, Math.round(table * priceMult));
-                      const owned = campaign.consumables[con.id] ?? 0;
-                      const pct = tableDeltaPct(p, table);
+                    {/* 1. Recursos */}
+                    <TradeSectionContainer
+                      title="Recursos"
+                      icon={<Coins className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                      count={sellResources.length}
+                      isOpen={Boolean(openTradeSections['sell_recursos'])}
+                      onToggle={() => toggleTradeSection('sell_recursos')}
+                    >
+                      {sellResources.length === 0 ? (
+                        <div className="text-slate-500 italic text-xs">Nenhum recurso no compartimento de carga.</div>
+                      ) : (
+                        sellResources.map(({ cargo: c, res }) => {
+                          const rStyle = RARITY_STYLES[res.rarity];
+                          const band = resourceSupplyBand(res.id, planet.id, system.planets);
+                          const already = campaign.planetSales?.[planet.id]?.[res.id] ?? 0;
+                          const resSellBonus =
+                            res.factionStyle === bonuses.activeTechCategory ? TECH_SYNERGY_BONUS.resourceSellPct : 0;
+                          const quote = quoteSale(
+                            res.basePrice,
+                            band,
+                            bonuses.tradePriceBonus + resSellBonus,
+                            already,
+                            c.qty,
+                            true
+                          );
+                          const pct = tableDeltaPct(quote.nextUnit, res.basePrice);
+                          return (
+                            <MarketRow
+                              key={c.resourceId}
+                              icon={<ResourceSprite resourceId={res.id} size={34} />}
+                              name={res.name}
+                              nameClass={rStyle.text}
+                              rarity={res.rarity}
+                              techCategory={res.factionStyle}
+                              activeTechCategory={bonuses.activeTechCategory}
+                              techBonusText="+15% venda"
+                              qty={c.qty}
+                              pct={pct}
+                              tone="venda"
+                              borderClass={rStyle.border}
+                              needed={neededResources.has(res.id)}
+                              detail={res.description}
+                              action={
+                                <span className="inline-flex gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => onSellResource(c.resourceId, 1)}
+                                    className="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold cursor-pointer"
+                                  >
+                                    {quote.nextUnit} créditos
+                                  </button>
+                                  {c.qty > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onSellResource(c.resourceId, c.qty)}
+                                      className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-semibold cursor-pointer"
+                                    >
+                                      Tudo {quote.total} créditos
+                                    </button>
+                                  )}
+                                </span>
+                              }
+                            />
+                          );
+                        })
+                      )}
+                    </TradeSectionContainer>
+
+                    {/* 2. Suprimentos */}
+                    <TradeSectionContainer
+                      title="Suprimentos"
+                      icon={<Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                      count={heldConsumables.length}
+                      isOpen={Boolean(openTradeSections['sell_suprimentos'])}
+                      onToggle={() => toggleTradeSection('sell_suprimentos')}
+                    >
+                      {heldConsumables.length === 0 ? (
+                        <div className="text-slate-500 italic text-xs">Nenhum suprimento ou consumível no compartimento.</div>
+                      ) : (
+                        heldConsumables.map(([id, qty]) => {
+                          const con = CONSUMABLES_BY_ID[id];
+                          if (!con) return null;
+                          const table = con.id === 'mantimentos' ? 1 : con.price;
+                          const buyRef = Math.max(1, Math.round(table * priceMult));
+                          const rawSell = Math.max(1, Math.round(table * 0.65 * (1 + bonuses.tradePriceBonus)));
+                          const unitSell = table <= 1 ? 1 : Math.max(1, Math.min(buyRef > 1 ? buyRef - 1 : 1, rawSell));
+                          const pct = tableDeltaPct(unitSell, table);
+                          const totalSell = unitSell * qty;
+                          return (
+                            <MarketRow
+                              key={id}
+                              icon={<EquipmentSprite category="consumable" itemId={con.id} size={32} />}
+                              name={con.name}
+                              rarity={con.rarity ?? 'comum'}
+                              techCategory={con.factionStyle}
+                              activeTechCategory={bonuses.activeTechCategory}
+                              techBonusText="+35% efeito"
+                              qty={qty}
+                              pct={pct}
+                              tone="venda"
+                              detail={con.description}
+                              action={
+                                <span className="inline-flex gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => onSellConsumable(con.id, 1, unitSell)}
+                                    className="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold cursor-pointer"
+                                  >
+                                    {unitSell} créditos
+                                  </button>
+                                  {qty > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onSellConsumable(con.id, qty, unitSell)}
+                                      className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-semibold cursor-pointer"
+                                    >
+                                      Tudo {totalSell.toLocaleString('pt-BR')} créditos
+                                    </button>
+                                  )}
+                                </span>
+                              }
+                            />
+                          );
+                        })
+                      )}
+                    </TradeSectionContainer>
+
+                    {/* 3..8 Armas, Escudos, Extratores, Motores, Utilidades, Trajes e Superfície */}
+                    {sellEquipCategories.map((catDef) => {
+                      const groups = sellGroupsByCategory(catDef.cat, catDef.filter);
+                      const totalCount = groups.reduce((acc, g) => acc + g.uids.length, 0);
                       return (
-                        <MarketRow
-                          key={con.id}
-                          icon={<EquipmentSprite category="consumable" itemId={con.id} size={32} />}
-                          name={con.name}
-                          rarity={con.rarity ?? 'comum'}
-                          techCategory={con.factionStyle}
-                          activeTechCategory={bonuses.activeTechCategory}
-                          techBonusText="+35% efeito"
-                          qty={owned}
-                          pct={pct}
-                          tone="compra"
-                          detail={con.description}
-                          action={
-                            <button
-                              type="button"
-                              disabled={campaign.credits < p}
-                              onClick={() => onBuyConsumable(con.id, p)}
-                              className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
-                            >
-                              {p} créditos
-                            </button>
-                          }
-                        />
+                        <TradeSectionContainer
+                          key={catDef.key}
+                          title={catDef.label}
+                          icon={catDef.icon}
+                          count={totalCount}
+                          isOpen={Boolean(openTradeSections[catDef.key])}
+                          onToggle={() => toggleTradeSection(catDef.key)}
+                        >
+                          {groups.length === 0 ? (
+                            <div className="text-slate-500 italic text-xs">{catDef.emptyText}</div>
+                          ) : (
+                            groups.map((grp) => {
+                              const meta = getEquipmentMeta(grp.category, grp.itemId);
+                              const rStyle = RARITY_STYLES[meta.rarity];
+                              const tablePrice = getEquipTablePrice(grp.category, grp.itemId);
+                              const styleDiscount = isFactionMatch(meta.factionStyle) ? 0.85 : 1.0;
+                              const buyRef = Math.max(50, Math.round(tablePrice * styleDiscount * priceMult));
+                              const rawSell = Math.max(25, Math.round(tablePrice * 0.68 * (1 + bonuses.tradePriceBonus)));
+                              const unitSell = Math.max(1, Math.min(buyRef > 1 ? buyRef - 1 : 1, rawSell));
+                              const pct = tableDeltaPct(unitSell, tablePrice);
+                              const count = grp.uids.length;
+                              const totalSell = unitSell * count;
+                              return (
+                                <MarketRow
+                                  key={`${grp.category}:${grp.itemId}`}
+                                  icon={<EquipmentSprite category={grp.category} itemId={grp.itemId} size={34} />}
+                                  name={meta.name}
+                                  nameClass={rStyle.text}
+                                  rarity={meta.rarity}
+                                  techCategory={meta.factionStyle}
+                                  activeTechCategory={bonuses.activeTechCategory}
+                                  qty={count}
+                                  pct={pct}
+                                  tone="venda"
+                                  borderClass={rStyle.border}
+                                  detail={
+                                    <>
+                                      <span className="font-mono-tabular text-cyan-300/90">{meta.statsLine}</span>
+                                      {meta.description ? ` — ${meta.description}` : ''}
+                                    </>
+                                  }
+                                  action={
+                                    <span className="inline-flex gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => onSellDepotGear([grp.uids[0]], unitSell)}
+                                        className="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold cursor-pointer"
+                                      >
+                                        {unitSell.toLocaleString('pt-BR')} créditos
+                                      </button>
+                                      {count > 1 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onSellDepotGear(grp.uids, unitSell)}
+                                          className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-semibold cursor-pointer"
+                                        >
+                                          Tudo {totalSell.toLocaleString('pt-BR')} créditos
+                                        </button>
+                                      )}
+                                    </span>
+                                  }
+                                />
+                              );
+                            })
+                          )}
+                        </TradeSectionContainer>
                       );
                     })}
-                  </div>
-                </div>
 
-                <div className="space-y-1.5">
-                  <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                    <ShoppingCart className="w-3.5 h-3.5 text-cyan-400" />
-                    Comprar recursos
-                  </div>
-                  {(() => {
-                    const rows: Array<{ id: string; band: 'local' | 'sistema' }> = [];
-                    const seen = new Set<string>();
-                    for (const deposit of planet.deposits) {
-                      if (deposit.remaining <= 0 || seen.has(deposit.resourceId)) continue;
-                      seen.add(deposit.resourceId);
-                      rows.push({ id: deposit.resourceId, band: 'local' });
-                    }
-                    for (const other of system.planets) {
-                      if (other.id === planet.id) continue;
-                      for (const deposit of other.deposits) {
-                        if (deposit.remaining <= 0 || seen.has(deposit.resourceId)) continue;
-                        seen.add(deposit.resourceId);
-                        rows.push({ id: deposit.resourceId, band: 'sistema' });
-                      }
-                    }
-                    if (rows.length === 0) {
-                      return <div className="text-slate-500 italic">Este mundo não oferece recursos.</div>;
-                    }
-                    return rows.map((row) => {
-                      const res = RESOURCES_BY_ID[row.id];
-                      if (!res) return null;
-                      const rStyle = RARITY_STYLES[res.rarity];
-                      const maxStock = planetResourceMaxStock(res.rarity, row.band);
-                      const alreadyPurchased = campaign.planetPurchases?.[planet.id]?.[res.id] ?? 0;
-                      const remainingStock = Math.max(0, maxStock - alreadyPurchased);
-                      const ownedInCargo = campaign.cargo.find((c) => c.resourceId === res.id)?.qty ?? 0;
-                      const resBuyMult = res.factionStyle === bonuses.activeTechCategory ? TECH_SYNERGY_BONUS.resourceBuyMult : 1;
-                      const unitBuy = unitBuyPrice(res.basePrice, row.band, priceMult * resBuyMult);
-                      const pct = tableDeltaPct(unitBuy, res.basePrice);
-                      return (
-                        <MarketRow
-                          key={row.id}
-                          icon={<ResourceSprite resourceId={res.id} size={34} />}
-                          name={res.name}
-                          nameClass={rStyle.text}
-                          rarity={res.rarity}
-                          techCategory={res.factionStyle}
-                          activeTechCategory={bonuses.activeTechCategory}
-                          techBonusText="-10% compra"
-                          qty={ownedInCargo}
-                          pct={pct}
-                          tone="compra"
-                          borderClass={rStyle.border}
-                          needed={neededResources.has(res.id)}
-                          footerRight={
-                            <span
-                              className={`font-mono-tabular ${
-                                remainingStock > 0 ? 'text-slate-400' : 'text-rose-400'
-                              }`}
+                    {/* Naves Sobressalentes */}
+                    <TradeSectionContainer
+                      title="Naves Sobressalentes"
+                      icon={<Rocket className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
+                      count={spareShips.length}
+                      isOpen={Boolean(openTradeSections['sell_ships'])}
+                      onToggle={() => toggleTradeSection('sell_ships')}
+                    >
+                      {spareShips.length === 0 ? (
+                        <div className="text-slate-500 italic text-xs">
+                          Você possui apenas 1 nave (sua nave ativa não pode ser vendida).
+                        </div>
+                      ) : (
+                        spareShips.map((s) => {
+                          const hd = HULLS_BY_ID[s.hullId] ?? HULLS[0];
+                          if (!hd) return null;
+                          const hullBuyRef = Math.round(hd.price * priceMult);
+                          const rawSell = Math.round(hd.price * 0.72 * (1 + bonuses.tradePriceBonus));
+                          const sellVal = Math.max(
+                            100,
+                            Math.min(hullBuyRef > 100 ? hullBuyRef - 1 : hullBuyRef, rawSell)
+                          );
+                          const pct = tableDeltaPct(sellVal, hd.price);
+                          return (
+                            <div
+                              key={s.uid}
+                              className="flex items-center justify-between bg-slate-900/70 border border-slate-800 rounded-xl p-2 gap-2.5"
                             >
-                              Estoque disponível ({remainingStock})
-                            </span>
-                          }
-                          detail={res.description}
-                          action={
-                            <button
-                              type="button"
-                              disabled={remainingStock <= 0 || campaign.credits < unitBuy || cargoFree <= 0}
-                              onClick={() => onBuyResource(res.id, 1, unitBuy)}
-                              className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
-                            >
-                              {remainingStock <= 0 ? 'Esgotado' : `${unitBuy} créditos`}
-                            </button>
-                          }
-                        />
-                      );
-                    });
-                  })()}
-                </div>
-
-                {/* Equipamentos */}
-                <div className="space-y-3 pt-2 border-t border-slate-800">
-                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <Crosshair className="w-4 h-4 text-cyan-400" />
-                    Equipamentos de Nave & Traje
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <HullSprite hullId={s.hullId} size={34} />
+                                <div className="min-w-0">
+                                  <div className="font-medium text-white truncate">
+                                    {s.customName} ({hd.name})
+                                  </div>
+                                  <div className="text-[11px] text-slate-300">
+                                    <PriceMark pct={pct} tone="venda" />
+                                  </div>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => onSellShip(s.uid, sellVal)}
+                                className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold shrink-0 cursor-pointer"
+                              >
+                                Vender ({sellVal.toLocaleString('pt-BR')} créditos)
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </TradeSectionContainer>
                   </div>
+                );
+              })()
+            ) : marketMode === 'comercio' ? (
+              (() => {
+                const resourceRows: Array<{ id: string; band: 'local' | 'sistema' }> = [];
+                const seenRes = new Set<string>();
+                for (const deposit of planet.deposits) {
+                  if (deposit.remaining <= 0 || seenRes.has(deposit.resourceId)) continue;
+                  seenRes.add(deposit.resourceId);
+                  resourceRows.push({ id: deposit.resourceId, band: 'local' });
+                }
+                for (const other of system.planets) {
+                  if (other.id === planet.id) continue;
+                  for (const deposit of other.deposits) {
+                    if (deposit.remaining <= 0 || seenRes.has(deposit.resourceId)) continue;
+                    seenRes.add(deposit.resourceId);
+                    resourceRows.push({ id: deposit.resourceId, band: 'sistema' });
+                  }
+                }
+                const accessibleConsumables = CONSUMABLES.filter((con) => isOriginAccessible(con));
+                const buyEquipGroups = [
+                  {
+                    key: 'buy_weapon',
+                    label: 'Armas',
+                    cat: 'weapon' as const,
+                    items: marketWeapons,
+                    icon: <Crosshair className="w-3.5 h-3.5 text-rose-400 shrink-0" />,
+                  },
+                  {
+                    key: 'buy_shield',
+                    label: 'Escudos',
+                    cat: 'shield' as const,
+                    items: marketShields,
+                    icon: <ShieldCheck className="w-3.5 h-3.5 text-sky-400 shrink-0" />,
+                  },
+                  {
+                    key: 'buy_extractor_ship',
+                    label: 'Extratores de Nave (máx. 2/nave)',
+                    cat: 'extractor' as const,
+                    items: marketShipExtractors,
+                    icon: <Pickaxe className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
+                  },
+                  {
+                    key: 'buy_extractor_manual',
+                    label: 'Extratores Manuais (Tripulação)',
+                    cat: 'extractor' as const,
+                    items: marketManualExtractors,
+                    icon: <Pickaxe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />,
+                  },
+                  {
+                    key: 'buy_jumpDrive',
+                    label: 'Motores',
+                    cat: 'jumpDrive' as const,
+                    items: marketDrives,
+                    icon: <Navigation className="w-3.5 h-3.5 text-indigo-400 shrink-0" />,
+                  },
+                  {
+                    key: 'buy_utility',
+                    label: 'Utilidades',
+                    cat: 'utility' as const,
+                    items: marketUtilities,
+                    icon: <Wrench className="w-3.5 h-3.5 text-cyan-400 shrink-0" />,
+                  },
+                  {
+                    key: 'buy_suit',
+                    label: 'Equipamentos da Tripulação (Trajes, Veículos & Tanques)',
+                    cat: 'suit' as const,
+                    items: marketSuit,
+                    icon: <Footprints className="w-3.5 h-3.5 text-emerald-400 shrink-0" />,
+                  },
+                ];
 
-                  {[
-                    { label: 'Armas', cat: 'weapon' as const, items: marketWeapons },
-                    { label: 'Escudos', cat: 'shield' as const, items: marketShields },
-                    { label: 'Extratores', cat: 'extractor' as const, items: marketExtractors },
-                    { label: 'Motores de Salto', cat: 'jumpDrive' as const, items: marketDrives },
-                    { label: 'Utilidades', cat: 'utility' as const, items: marketUtilities },
-                    { label: 'Trajes & Superfície', cat: 'suit' as const, items: marketSuit },
-                  ].map((grp) => (
-                    <div key={grp.label} className="space-y-1.5">
-                      <div className="text-[11px] font-semibold text-cyan-300">{grp.label}</div>
-                      {grp.items.map((item) => {
-                        const meta = getEquipmentMeta(grp.cat, item.id);
-                        const rStyle = RARITY_STYLES[meta.rarity];
-                        const styleDiscount = isFactionMatch((item as { factionStyle?: string }).factionStyle) ? 0.85 : 1.0;
-                        const finalP = Math.max(50, Math.round(item.price * styleDiscount * priceMult));
+                return (
+                  <div className="space-y-2.5">
+                    <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <span className="text-slate-300">
+                        Cada porcentagem compara o preço com o valor de tabela.
+                      </span>
+                      <span className="font-mono-tabular text-slate-300">
+                        Compartimento livre: <strong className="text-cyan-300">{cargoFree} unidades</strong>
+                      </span>
+                    </div>
 
-                        const depotOwned = activeShip.depot.filter(
-                          (d) => d.category === grp.cat && d.itemId === item.id
-                        ).length;
-                        const installedOwned =
-                          grp.cat === 'weapon'
-                            ? activeShip.weaponId === item.id
-                              ? 1
-                              : 0
-                            : grp.cat === 'jumpDrive'
-                            ? activeShip.jumpDriveId === item.id
-                              ? 1
-                              : 0
-                            : grp.cat === 'shield'
-                            ? activeShip.shieldIds.filter((id) => id === item.id).length
-                            : grp.cat === 'extractor'
-                            ? activeShip.extractorIds.filter((id) => id === item.id).length
-                            : grp.cat === 'utility'
-                            ? activeShip.utilityIds.filter((id) => id === item.id).length
-                            : activeShip.suitGearIds.filter((id) => id === item.id).length;
-                        const ownedEquipCount = installedOwned + depotOwned;
+                    {/* 1. Recursos */}
+                    <TradeSectionContainer
+                      title="Recursos"
+                      icon={<ShoppingCart className="w-3.5 h-3.5 text-cyan-400 shrink-0" />}
+                      count={resourceRows.length}
+                      isOpen={Boolean(openTradeSections['buy_recursos'])}
+                      onToggle={() => toggleTradeSection('buy_recursos')}
+                    >
+                      {resourceRows.length === 0 ? (
+                        <div className="text-slate-500 italic text-xs">Este mundo não oferece recursos.</div>
+                      ) : (
+                        resourceRows.map((row) => {
+                          const res = RESOURCES_BY_ID[row.id];
+                          if (!res) return null;
+                          const rStyle = RARITY_STYLES[res.rarity];
+                          const maxStock = planetResourceMaxStock(res.rarity, row.band);
+                          const alreadyPurchased = campaign.planetPurchases?.[planet.id]?.[res.id] ?? 0;
+                          const remainingStock = Math.max(0, maxStock - alreadyPurchased);
+                          const ownedInCargo = campaign.cargo.find((c) => c.resourceId === res.id)?.qty ?? 0;
+                          const resBuyMult =
+                            res.factionStyle === bonuses.activeTechCategory ? TECH_SYNERGY_BONUS.resourceBuyMult : 1;
+                          const unitBuy = unitBuyPrice(res.basePrice, row.band, priceMult * resBuyMult);
+                          const pct = tableDeltaPct(unitBuy, res.basePrice);
+                          return (
+                            <MarketRow
+                              key={row.id}
+                              icon={<ResourceSprite resourceId={res.id} size={34} />}
+                              name={res.name}
+                              nameClass={rStyle.text}
+                              rarity={res.rarity}
+                              techCategory={res.factionStyle}
+                              activeTechCategory={bonuses.activeTechCategory}
+                              techBonusText="-10% compra"
+                              qty={ownedInCargo}
+                              pct={pct}
+                              tone="compra"
+                              borderClass={rStyle.border}
+                              needed={neededResources.has(res.id)}
+                              footerRight={
+                                <span
+                                  className={`font-mono-tabular ${
+                                    remainingStock > 0 ? 'text-slate-400' : 'text-rose-400'
+                                  }`}
+                                >
+                                  Estoque disponível ({remainingStock})
+                                </span>
+                              }
+                              detail={res.description}
+                              action={
+                                <button
+                                  type="button"
+                                  disabled={remainingStock <= 0 || campaign.credits < unitBuy || cargoFree <= 0}
+                                  onClick={() => onBuyResource(res.id, 1, unitBuy)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
+                                >
+                                  {remainingStock <= 0 ? 'Esgotado' : `${unitBuy} créditos`}
+                                </button>
+                              }
+                            />
+                          );
+                        })
+                      )}
+                    </TradeSectionContainer>
 
-                        let deltaHint: string | null = null;
-                        if (grp.cat === 'weapon' && equippedWeapon) {
-                          const w = WEAPONS_BY_ID[item.id];
-                          if (w) {
-                            const diff = w.dps - equippedWeapon.dps;
-                            deltaHint = diff === 0 ? 'Igual à arma atual' : `${diff > 0 ? '+' : ''}${diff} DPS vs atual`;
-                          }
-                        } else if (grp.cat === 'shield' && primaryShield) {
-                          const s = SHIELDS_BY_ID[item.id];
-                          if (s) {
-                            const diff = s.capacity - primaryShield.capacity;
-                            deltaHint = diff === 0 ? 'Mesma cap. do escudo 1' : `${diff > 0 ? '+' : ''}${diff} Escudo vs atual`;
-                          }
-                        } else if (grp.cat === 'jumpDrive' && equippedJumpDrive) {
-                          const j = JUMP_DRIVES_BY_ID[item.id];
-                          if (j) {
-                            const diff = j.jumpRangeLy - equippedJumpDrive.jumpRangeLy;
-                            deltaHint = diff === 0 ? 'Igual ao motor atual' : `${diff > 0 ? '+' : ''}${diff} anos-luz de alcance`;
-                          }
-                        }
-
-                        const equipBonusText =
-                          grp.cat === 'weapon'
-                            ? '+18% DPS'
-                            : grp.cat === 'shield'
-                            ? '+18% Esc.'
-                            : grp.cat === 'extractor'
-                            ? '+25% Ext.'
-                            : grp.cat === 'jumpDrive'
-                            ? '+15% Alc.'
-                            : grp.cat === 'utility'
-                            ? '+20%'
-                            : '+25%';
-
+                    {/* 2. Suprimentos */}
+                    <TradeSectionContainer
+                      title="Suprimentos"
+                      icon={<Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                      count={accessibleConsumables.length}
+                      isOpen={Boolean(openTradeSections['buy_suprimentos'])}
+                      onToggle={() => toggleTradeSection('buy_suprimentos')}
+                    >
+                      {accessibleConsumables.map((con) => {
+                        const table = con.id === 'mantimentos' ? 1 : con.price;
+                        const p = Math.max(1, Math.round(table * priceMult));
+                        const owned = campaign.consumables[con.id] ?? 0;
+                        const pct = tableDeltaPct(p, table);
+                        const stockKey = consumableStockKey(con.id);
+                        const purchased = campaign.planetPurchases?.[planet.id]?.[stockKey] ?? 0;
+                        const remainingStock = planetConsumableRemainingStock(
+                          con.rarity ?? 'comum',
+                          planetTech,
+                          purchased
+                        );
                         return (
                           <MarketRow
-                            key={item.id}
-                            icon={<EquipmentSprite category={grp.cat} itemId={item.id} size={34} />}
-                            name={meta.name}
-                            nameClass={rStyle.text}
-                            rarity={meta.rarity}
-                            techCategory={meta.factionStyle}
+                            key={con.id}
+                            icon={<EquipmentSprite category="consumable" itemId={con.id} size={32} />}
+                            name={con.name}
+                            rarity={con.rarity ?? 'comum'}
+                            techCategory={con.factionStyle}
                             activeTechCategory={bonuses.activeTechCategory}
-                            techBonusText={equipBonusText}
-                            qty={ownedEquipCount}
-                            pct={tableDeltaPct(finalP, item.price)}
+                            techBonusText="+35% efeito"
+                            qty={owned}
+                            pct={pct}
                             tone="compra"
-                            borderClass={rStyle.border}
-                            detail={
-                              <>
-                                <span className="font-mono-tabular text-cyan-300/90">{meta.statsLine}</span>
-                                {deltaHint ? ` · ${deltaHint.replace(/^[+-]/, '')}` : ''}
-                                {meta.description ? ` — ${meta.description}` : ''}
-                              </>
+                            footerRight={
+                              <span
+                                className={`font-mono-tabular ${
+                                  remainingStock > 0 ? 'text-slate-400' : 'text-rose-400'
+                                }`}
+                              >
+                                Estoque disponível ({remainingStock})
+                              </span>
                             }
+                            detail={con.description}
                             action={
                               <button
                                 type="button"
-                                disabled={campaign.credits < finalP}
-                                onClick={() => onBuyEquipment(grp.cat, item.id, finalP)}
+                                disabled={remainingStock <= 0 || campaign.credits < p}
+                                onClick={() => onBuyConsumable(con.id, p)}
                                 className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
                               >
-                                {finalP.toLocaleString('pt-BR')} créditos
+                                {remainingStock <= 0 ? 'Esgotado' : `${p} créditos`}
                               </button>
                             }
                           />
                         );
                       })}
-                    </div>
-                  ))}
-                </div>
-              </div>
+                    </TradeSectionContainer>
+
+                    {/* 3..8 Armas, Escudos, Extratores, Motores, Utilidades, Trajes e Superfície */}
+                    {buyEquipGroups.map((grp) => (
+                      <TradeSectionContainer
+                        key={grp.key}
+                        title={grp.label}
+                        icon={grp.icon}
+                        count={grp.items.length}
+                        isOpen={Boolean(openTradeSections[grp.key])}
+                        onToggle={() => toggleTradeSection(grp.key)}
+                      >
+                        {grp.items.length === 0 ? (
+                          <div className="text-slate-500 italic text-xs">
+                            Nenhum item desta categoria disponível neste planeta.
+                          </div>
+                        ) : (
+                          grp.items.map((item) => {
+                            const meta = getEquipmentMeta(grp.cat, item.id);
+                            const rStyle = RARITY_STYLES[meta.rarity];
+                            const styleDiscount = isFactionMatch((item as { factionStyle?: string }).factionStyle)
+                              ? 0.85
+                              : 1.0;
+                            const finalP = Math.max(50, Math.round(item.price * styleDiscount * priceMult));
+
+                            const depotOwned = activeShip.depot.filter(
+                              (d) => d.category === grp.cat && d.itemId === item.id
+                            ).length;
+                            const installedOwned =
+                              grp.cat === 'weapon'
+                                ? activeShip.weaponId === item.id
+                                  ? 1
+                                  : 0
+                                : grp.cat === 'jumpDrive'
+                                ? activeShip.jumpDriveId === item.id
+                                  ? 1
+                                  : 0
+                                : grp.cat === 'shield'
+                                ? activeShip.shieldIds.filter((id) => id === item.id).length
+                                : grp.cat === 'extractor'
+                                ? isManualExtractor(item.id)
+                                  ? (campaign.crewEquipment ?? []).filter(
+                                      (eq) => eq.category === 'extractor' && eq.itemId === item.id
+                                    ).length
+                                  : activeShip.extractorIds.filter((id) => id === item.id).length
+                                : grp.cat === 'utility'
+                                ? activeShip.utilityIds.filter((id) => id === item.id).length
+                                : (campaign.crewEquipment ?? []).filter(
+                                    (eq) => eq.category === 'suit' && eq.itemId === item.id
+                                  ).length;
+                            const ownedEquipCount = installedOwned + depotOwned;
+                            const crewMaintCost = isCrewEquipableItem(grp.cat, item.id)
+                              ? getCrewItemMaintenancePerCycle(grp.cat, item.id)
+                              : 0;
+
+                            let deltaHint: string | null = null;
+                            if (grp.cat === 'weapon' && equippedWeapon) {
+                              const w = WEAPONS_BY_ID[item.id];
+                              if (w) {
+                                const diff = w.dps - equippedWeapon.dps;
+                                deltaHint = diff === 0 ? 'Igual à arma atual' : `${diff > 0 ? '+' : ''}${diff} DPS vs atual`;
+                              }
+                            } else if (grp.cat === 'shield' && primaryShield) {
+                              const s = SHIELDS_BY_ID[item.id];
+                              if (s) {
+                                const diff = s.capacity - primaryShield.capacity;
+                                deltaHint =
+                                  diff === 0 ? 'Mesma cap. do escudo 1' : `${diff > 0 ? '+' : ''}${diff} Escudo vs atual`;
+                              }
+                            } else if (grp.cat === 'jumpDrive' && equippedJumpDrive) {
+                              const j = JUMP_DRIVES_BY_ID[item.id];
+                              if (j) {
+                                const diff = j.jumpRangeLy - equippedJumpDrive.jumpRangeLy;
+                                deltaHint =
+                                  diff === 0 ? 'Igual ao motor atual' : `${diff > 0 ? '+' : ''}${diff} anos-luz de alcance`;
+                              }
+                            }
+
+                            const equipBonusText =
+                              grp.cat === 'weapon'
+                                ? '+18% DPS'
+                                : grp.cat === 'shield'
+                                ? '+18% Esc.'
+                                : grp.cat === 'extractor'
+                                ? '+25% Ext.'
+                                : grp.cat === 'jumpDrive'
+                                ? '+15% Alc.'
+                                : grp.cat === 'utility'
+                                ? '+20%'
+                                : '+25%';
+
+                            const equipStockKey = equipmentStockKey(grp.cat, item.id);
+                            const equipPurchased = campaign.planetPurchases?.[planet.id]?.[equipStockKey] ?? 0;
+                            const remainingEquipStock = planetEquipmentRemainingStock(
+                              meta.rarity,
+                              planetTech,
+                              isFactionMatch((item as { factionStyle?: string }).factionStyle),
+                              equipPurchased
+                            );
+
+                            return (
+                              <MarketRow
+                                key={item.id}
+                                icon={<EquipmentSprite category={grp.cat} itemId={item.id} size={34} />}
+                                name={meta.name}
+                                nameClass={rStyle.text}
+                                rarity={meta.rarity}
+                                techCategory={meta.factionStyle}
+                                activeTechCategory={bonuses.activeTechCategory}
+                                techBonusText={equipBonusText}
+                                qty={ownedEquipCount}
+                                pct={tableDeltaPct(finalP, item.price)}
+                                tone="compra"
+                                borderClass={rStyle.border}
+                                footerRight={
+                                  <span
+                                    className={`font-mono-tabular ${
+                                      remainingEquipStock > 0 ? 'text-slate-400' : 'text-rose-400'
+                                    }`}
+                                  >
+                                    Estoque disponível ({remainingEquipStock})
+                                  </span>
+                                }
+                                detail={
+                                  <>
+                                    <span className="font-mono-tabular text-cyan-300/90">{meta.statsLine}</span>
+                                    {crewMaintCost > 0 && (
+                                      <span className="font-mono-tabular text-amber-300"> · Manut.: {crewMaintCost} cr/ciclo</span>
+                                    )}
+                                    {deltaHint ? ` · ${deltaHint.replace(/^[+-]/, '')}` : ''}
+                                    {meta.description ? ` — ${meta.description}` : ''}
+                                  </>
+                                }
+                                action={
+                                  <button
+                                    type="button"
+                                    disabled={remainingEquipStock <= 0 || campaign.credits < finalP}
+                                    onClick={() => onBuyEquipment(grp.cat, item.id, finalP)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
+                                  >
+                                    {remainingEquipStock <= 0 ? 'Esgotado' : `${finalP.toLocaleString('pt-BR')} créditos`}
+                                  </button>
+                                }
+                              />
+                            );
+                          })
+                        )}
+                      </TradeSectionContainer>
+                    ))}
+                  </div>
+                );
+              })()
             ) : (
               <div className="space-y-4">
                 <div className="bg-slate-900/75 border border-slate-800 rounded-xl p-2.5">
@@ -2765,6 +3077,8 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                     })
                     .map((bp) => {
                     const owned = campaign.blueprintsOwned.includes(bp.id);
+                    const bpPurchased = campaign.planetPurchases?.[planet.id]?.[blueprintStockKey(bp.id)] ?? 0;
+                    const bpStock = owned ? 0 : planetBlueprintRemainingStock(bpPurchased);
                     const buyPrice = Math.round(bp.price * priceMult);
                     const hasAllResources = bp.requiredResources.every(
                       (req) => (campaign.cargo.find((c) => c.resourceId === req.resourceId)?.qty ?? 0) >= req.qty
@@ -2795,16 +3109,21 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                               </div>
                               <div className="text-[10px] font-mono-tabular text-cyan-300">{targetMeta.statsLine}</div>
                               <div className="text-[11px] text-slate-300">{bp.description}</div>
+                              {!owned && (
+                                <div className={`text-[10px] font-mono-tabular ${bpStock > 0 ? 'text-slate-400' : 'text-rose-400'}`}>
+                                  Estoque disponível ({bpStock})
+                                </div>
+                              )}
                             </div>
                           </div>
                           {!owned ? (
                             <button
                               type="button"
-                              disabled={campaign.credits < buyPrice}
+                              disabled={bpStock <= 0 || campaign.credits < buyPrice}
                               onClick={() => onBuyBlueprint(bp.id, buyPrice)}
                               className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
                             >
-                              Projeto {buyPrice.toLocaleString('pt-BR')} cr
+                              {bpStock <= 0 ? 'Esgotado' : `Projeto ${buyPrice.toLocaleString('pt-BR')} cr`}
                             </button>
                           ) : (
                             <button
@@ -2861,6 +3180,9 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                     const rStyle = RARITY_STYLES[h.rarity];
                     const hullFac = h.factionExclusiveId ? FACTIONS_BY_ID[h.factionExclusiveId] : undefined;
                     const switchesFaction = Boolean(hullFac && hullFac.id !== campaign.chosenFactionId);
+                    const hStockKey = hullStockKey(h.id);
+                    const hPurchased = campaign.planetPurchases?.[planet.id]?.[hStockKey] ?? 0;
+                    const remainingHullStock = planetHullRemainingStock(h.rarity, hPurchased);
                     return (
                       <div
                         key={h.id}
@@ -2899,9 +3221,12 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                               Casco {h.maxHull} · Blind. {h.armor} · Vel. {h.speed} · Comb. {h.fuelCapacity} · Carga {h.cargoCapacity}
                             </div>
                             <div className="text-[10px] font-mono-tabular text-slate-400">
-                              Slots: Arma {h.weaponSlots} · Esc. {h.defenseSlots} · Ext. {h.extractionSlots} · Util. {h.utilitySlots} · Trip. {h.activeCrewPosts}+{h.reserveQuarters}
+                              Slots: Arma {h.weaponSlots} · Esc. {h.defenseSlots} · Ext. {Math.min(2, h.extractionSlots)} · Util. {h.utilitySlots} · Trip. {h.activeCrewPosts}+{h.reserveQuarters}
                             </div>
                             <div className="text-[11px] text-slate-300">{h.description}</div>
+                            <div className={`text-[10px] font-mono-tabular ${remainingHullStock > 0 ? 'text-slate-400' : 'text-rose-400'}`}>
+                              Estoque disponível ({remainingHullStock})
+                            </div>
                             {switchesFaction && hullFac && (
                               <div className="text-[10px] font-semibold" style={{ color: hullFac.color }}>
                                 Comprar & pilotar esta nave muda sua facção ativa para {hullFac.name}.
@@ -2911,11 +3236,11 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                         </div>
                         <button
                           type="button"
-                          disabled={campaign.credits < hullPrice}
+                          disabled={remainingHullStock <= 0 || campaign.credits < hullPrice}
                           onClick={() => onBuyHull(h.id, hullPrice)}
                           className="px-2.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
                         >
-                          {hullPrice.toLocaleString('pt-BR')} créditos
+                          {remainingHullStock <= 0 ? 'Esgotado' : `${hullPrice.toLocaleString('pt-BR')} créditos`}
                         </button>
                       </div>
                     );
@@ -3108,55 +3433,61 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                     </div>
                   </div>
 
-                  {crewCandidates.map((cand) => {
-                    const activeInRole = campaign.crew.some((c) => c.status === 'ativo' && c.role === cand.role);
-                    const activeCount = campaign.crew.filter((c) => c.status === 'ativo').length;
-                    const reserveCount = campaign.crew.filter((c) => c.status === 'reserva').length;
-                    const canTakeActive = !activeInRole && activeCount < hullDef.activeCrewPosts;
-                    const canTakeReserve = reserveCount < hullDef.reserveQuarters;
-                    const canHire = (canTakeActive || canTakeReserve) && campaign.credits >= cand.hireCost;
-                    const skillTier = cand.skill >= 80 ? 5 : cand.skill >= 60 ? 4 : cand.skill >= 40 ? 3 : cand.skill >= 20 ? 2 : 1;
-                    const candSpecies = SPECIES_BY_ID[cand.speciesId];
+                  {crewCandidates.length === 0 ? (
+                    <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-3 text-center text-[11px] text-slate-400 italic">
+                      Todos os candidatos disponíveis neste porto já foram contratados. Novos tripulantes chegarão no próximo turno orbital.
+                    </div>
+                  ) : (
+                    crewCandidates.map((cand) => {
+                      const activeInRole = campaign.crew.some((c) => c.status === 'ativo' && c.role === cand.role);
+                      const activeCount = campaign.crew.filter((c) => c.status === 'ativo').length;
+                      const reserveCount = campaign.crew.filter((c) => c.status === 'reserva').length;
+                      const canTakeActive = !activeInRole && activeCount < hullDef.activeCrewPosts;
+                      const canTakeReserve = reserveCount < hullDef.reserveQuarters;
+                      const canHire = (canTakeActive || canTakeReserve) && campaign.credits >= cand.hireCost;
+                      const skillTier = cand.skill >= 80 ? 5 : cand.skill >= 60 ? 4 : cand.skill >= 40 ? 3 : cand.skill >= 20 ? 2 : 1;
+                      const candSpecies = SPECIES_BY_ID[cand.speciesId];
 
-                    return (
-                      <div
-                        key={cand.id}
-                        className="bg-slate-900/65 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between gap-2.5"
-                      >
-                        <div className="flex items-start gap-2.5 min-w-0">
-                          <CrewPortraitSprite speciesId={cand.speciesId} role={cand.role} size={38} />
-                          <div className="space-y-0.5 min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-semibold text-white">{cand.name}</span>
-                              <span className="text-cyan-300 font-medium">{ROLE_LABELS[cand.role].label}</span>
-                              <span className={`px-1.5 py-0.5 rounded border text-[10px] font-mono-tabular ${getLevelStyle(skillTier, 'tech').badge}`}>
-                                Perícia {cand.skill}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-slate-300">{ROLE_LABELS[cand.role].desc}</div>
-                            <div className="text-[10px] text-slate-400 font-mono-tabular flex flex-wrap gap-x-2">
-                              <span>Espécie: {candSpecies?.name}</span>
-                              <span>· Consumo: {Number((cand.skill * (1.5 / 2.5) * 0.65).toFixed(1))} mant./min</span>
-                              <span>· {canTakeActive ? 'Posto Ativo' : canTakeReserve ? 'Reserva (+5%)' : 'Sem vaga'}</span>
+                      return (
+                        <div
+                          key={cand.id}
+                          className="bg-slate-900/65 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between gap-2.5"
+                        >
+                          <div className="flex items-start gap-2.5 min-w-0">
+                            <CrewPortraitSprite speciesId={cand.speciesId} role={cand.role} size={38} />
+                            <div className="space-y-0.5 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-semibold text-white">{cand.name}</span>
+                                <span className="text-cyan-300 font-medium">{ROLE_LABELS[cand.role].label}</span>
+                                <span className={`px-1.5 py-0.5 rounded border text-[10px] font-mono-tabular ${getLevelStyle(skillTier, 'tech').badge}`}>
+                                  Perícia {cand.skill}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-300">{ROLE_LABELS[cand.role].desc}</div>
+                              <div className="text-[10px] text-slate-400 font-mono-tabular flex flex-wrap gap-x-2">
+                                <span>Espécie: {candSpecies?.name}</span>
+                                <span>· Consumo: {Number(computeCrewMemberSupplyPerMin(cand, bonuses.supplyCostMult).toFixed(1))} mant./min</span>
+                                <span>· {canTakeActive ? 'Posto Ativo' : canTakeReserve ? 'Reserva (+5%)' : 'Sem vaga'}</span>
+                              </div>
                             </div>
                           </div>
+                          <button
+                            type="button"
+                            disabled={!canHire}
+                            onClick={() =>
+                              onHireCrew({
+                                ...cand,
+                                status: canTakeActive ? 'ativo' : 'reserva',
+                              })
+                            }
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
+                          >
+                            {!canTakeActive && !canTakeReserve ? 'Sem vaga' : `Contratar (${cand.hireCost} cr)`}
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          disabled={!canHire}
-                          onClick={() =>
-                            onHireCrew({
-                              ...cand,
-                              status: canTakeActive ? 'ativo' : 'reserva',
-                            })
-                          }
-                          className="px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold shrink-0 cursor-pointer"
-                        >
-                          {!canTakeActive && !canTakeReserve ? 'Sem vaga' : `Contratar (${cand.hireCost} cr)`}
-                        </button>
-                      </div>
-                    );
-                  })}
+                      );
+                    })
+                  )}
                 </div>
               </>
             )}

@@ -80,7 +80,8 @@ export function planRandomEncounter(
   campaign: PlayerCampaignState,
   systemId: string,
   ownerId: string | null,
-  random: () => number = Math.random
+  random: () => number = Math.random,
+  cloakReduction = 0
 ): EncounterPlan {
   const playerFaction = campaign.chosenFactionId;
   const hunt = huntMissionInSystem(campaign, systemId);
@@ -95,16 +96,20 @@ export function planRandomEncounter(
   });
   if (peacefulIds.length === 0) peacefulIds.push(playerFaction);
 
+  const hostileCloakFactor = Math.max(0.25, 1 - Math.min(0.75, Math.max(0, cloakReduction)));
+
   const options: Array<{ kind: EncounterKind; weight: number }> = [
-    { kind: 'comercial', weight: 36 },
-    { kind: 'diplomatico', weight: 28 },
+    { kind: 'comercial', weight: 48 },
+    { kind: 'diplomatico', weight: 40 },
   ];
-  if (hunt) options.push({ kind: 'cacada', weight: 44 });
+  if (hunt) options.push({ kind: 'cacada', weight: 42 });
   if (warIds.length > 0) {
-    options.push({ kind: 'guerra', weight: ownerId && warIds.includes(ownerId) ? 48 : 16 });
+    const baseWarWeight = ownerId && warIds.includes(ownerId) ? 42 : 14;
+    options.push({ kind: 'guerra', weight: Math.max(4, Math.round(baseWarWeight * hostileCloakFactor)) });
   }
   if (enemyIds.length > 0) {
-    options.push({ kind: 'inimigos', weight: ownerId && enemyIds.includes(ownerId) ? 40 : 18 });
+    const baseEnemyWeight = ownerId && enemyIds.includes(ownerId) ? 36 : 16;
+    options.push({ kind: 'inimigos', weight: Math.max(4, Math.round(baseEnemyWeight * hostileCloakFactor)) });
   }
 
   const picked = weightedPick(options, random);
@@ -239,12 +244,28 @@ export function buildCommercialTrade(
     });
   }
 
-  const installed: Array<{ category: EncounterGearCategory; itemId: string; slotIndex: number }> = [];
-  if (ship.weaponId) installed.push({ category: 'weapon', itemId: ship.weaponId, slotIndex: 0 });
-  ship.shieldIds.forEach((itemId, slotIndex) => installed.push({ category: 'shield', itemId, slotIndex }));
-  ship.extractorIds.forEach((itemId, slotIndex) => installed.push({ category: 'extractor', itemId, slotIndex }));
-  ship.utilityIds.forEach((itemId, slotIndex) => installed.push({ category: 'utility', itemId, slotIndex }));
-  ship.suitGearIds.forEach((itemId, slotIndex) => installed.push({ category: 'suit', itemId, slotIndex }));
+  const installed: Array<{
+    category: EncounterGearCategory;
+    itemId: string;
+    slotIndex: number;
+    source: 'ship' | 'crew';
+    crewUid?: string;
+  }> = [];
+  if (ship.weaponId) installed.push({ category: 'weapon', itemId: ship.weaponId, slotIndex: 0, source: 'ship' });
+  ship.shieldIds.forEach((itemId, slotIndex) => installed.push({ category: 'shield', itemId, slotIndex, source: 'ship' }));
+  ship.extractorIds.forEach((itemId, slotIndex) => installed.push({ category: 'extractor', itemId, slotIndex, source: 'ship' }));
+  ship.utilityIds.forEach((itemId, slotIndex) => installed.push({ category: 'utility', itemId, slotIndex, source: 'ship' }));
+  (campaign.crewEquipment ?? []).forEach((item, slotIndex) => {
+    if (item.category === 'suit' || item.category === 'extractor') {
+      installed.push({
+        category: item.category,
+        itemId: item.itemId,
+        slotIndex,
+        source: 'crew',
+        crewUid: item.uid,
+      });
+    }
+  });
 
   const sellOffers: EncounterSellOffer[] = [];
   if (installed.length > 0) {
@@ -256,6 +277,8 @@ export function buildCommercialTrade(
         category: pick.category,
         itemId: pick.itemId,
         slotIndex: pick.slotIndex,
+        source: pick.source,
+        crewUid: pick.crewUid,
         price: goodSellPrice(table, next(), tradePriceBonus),
       });
     }

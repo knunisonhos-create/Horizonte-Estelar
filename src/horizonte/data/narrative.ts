@@ -339,35 +339,38 @@ export function generateMissionsForFaction(
 
       if (bombEnemyId && bombSys && bombPlanet) {
         const bombEnemyFac = FACTIONS_BY_ID[bombEnemyId];
-        const bombDist = Math.max(
-          4,
-          Math.hypot(bombSys.x - currentSystem.x, bombSys.y - currentSystem.y, bombSys.z - currentSystem.z)
-        );
-        const bombBpId = pickWarBp(0.75);
-        const bombBpDef = bombBpId ? BLUEPRINTS_BY_ID[bombBpId] : undefined;
-        const bombBpText = bombBpDef ? ` · Recompensa: ${bombBpDef.name}` : '';
+        const bombTargetLv = getPlanetCurrentLevel(bombPlanet, state);
+        if (bombTargetLv >= 2) {
+          const bombDist = Math.max(
+            4,
+            Math.hypot(bombSys.x - currentSystem.x, bombSys.y - currentSystem.y, bombSys.z - currentSystem.z)
+          );
+          const bombBpId = pickWarBp(0.75);
+          const bombBpDef = bombBpId ? BLUEPRINTS_BY_ID[bombBpId] : undefined;
+          const bombBpText = bombBpDef ? ` · Recompensa: ${bombBpDef.name}` : '';
 
-        warMissions.push({
-          id: `mis_war_bomb_${currentSystem.id}_${factionId}_${Math.floor(state.gameTimeSeconds / 120)}`,
-          title: `Bombardeio Orbital: ${bombPlanet.name}`,
-          type: 'guerra',
-          warKind: 'bombardeio',
-          issuerFactionId: factionId,
-          targetFactionId: bombEnemyId,
-          targetSystemId: bombSys.id,
-          targetSystemName: bombSys.name,
-          targetSystemCoord: { x: bombSys.x, y: bombSys.y, z: bombSys.z },
-          targetPlanetId: bombPlanet.id,
-          targetPlanetName: bombPlanet.name,
-          bombardCompleted: false,
-          rewardCredits: Math.round((780 + bombDist * 32) * 1.85),
-          rewardRenown: rng.int(26, 38),
-          rewardBlueprintId: bombBpId,
-          rewardItemName: bombBpDef?.name,
-          isRivalTerritory: true,
-          status: 'disponivel',
-          description: `Operação militar: entrar em órbita de ${bombPlanet.name} (${bombSys.name}, ${bombEnemyFac?.name ?? 'inimigo'}) e executar Bombardeio Orbital (exige arma de bombardeio).${bombBpText}`,
-        });
+          warMissions.push({
+            id: `mis_war_bomb_${currentSystem.id}_${factionId}_${Math.floor(state.gameTimeSeconds / 120)}`,
+            title: `Bombardeio Orbital: ${bombPlanet.name}`,
+            type: 'guerra',
+            warKind: 'bombardeio',
+            issuerFactionId: factionId,
+            targetFactionId: bombEnemyId,
+            targetSystemId: bombSys.id,
+            targetSystemName: bombSys.name,
+            targetSystemCoord: { x: bombSys.x, y: bombSys.y, z: bombSys.z },
+            targetPlanetId: bombPlanet.id,
+            targetPlanetName: bombPlanet.name,
+            bombardCompleted: false,
+            rewardCredits: Math.round((780 + bombDist * 32) * 1.85),
+            rewardRenown: rng.int(26, 38),
+            rewardBlueprintId: bombBpId,
+            rewardItemName: bombBpDef?.name,
+            isRivalTerritory: true,
+            status: 'disponivel',
+            description: `Operação militar: entrar em órbita de ${bombPlanet.name} (Nv ${bombTargetLv}, ${bombSys.name}, ${bombEnemyFac?.name ?? 'inimigo'}) e executar Bombardeio Orbital (exige arma de bombardeio).${bombBpText}`,
+          });
+        }
       }
     }
   }
@@ -633,6 +636,19 @@ export function checkMissionReadyInLocation(
     if (mission.warKind === 'bombardeio') {
       if (mission.bombardCompleted) {
         return { ready: true, reason: 'Bombardeio orbital executado! Pronta para entrega.' };
+      }
+      if (mission.targetSystemId && mission.targetPlanetId) {
+        const targetSys = getSystemSummaryById(mission.targetSystemId);
+        if (targetSys) {
+          const targetFull = generateSolarSystem(targetSys);
+          const targetPl = targetFull.planets.find((pl) => pl.id === mission.targetPlanetId);
+          if (targetPl && getPlanetCurrentLevel(targetPl, state) <= 1) {
+            return {
+              ready: true,
+              reason: `${targetPl.name} já foi reduzido a nível ≤ 1! Missão pronta para entrega.`,
+            };
+          }
+        }
       }
       if (state.currentSystemId !== mission.targetSystemId) {
         return {

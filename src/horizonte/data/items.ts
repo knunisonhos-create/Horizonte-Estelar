@@ -443,7 +443,7 @@ export const BASE_AND_SPECIES_HULLS: HullDef[] = [
     armor: 22,
     weaponSlots: 1,
     defenseSlots: 1,
-    extractionSlots: 4,
+    extractionSlots: 2,
     utilitySlots: 3,
     cargoCapacity: 320,
     fuelCapacity: 260,
@@ -485,7 +485,7 @@ export const BASE_AND_SPECIES_HULLS: HullDef[] = [
     armor: 26,
     weaponSlots: 1,
     defenseSlots: 2,
-    extractionSlots: 3,
+    extractionSlots: 2,
     utilitySlots: 4,
     cargoCapacity: 400,
     fuelCapacity: 360,
@@ -506,7 +506,7 @@ export const BASE_AND_SPECIES_HULLS: HullDef[] = [
     armor: 45,
     weaponSlots: 1,
     defenseSlots: 2,
-    extractionSlots: 3,
+    extractionSlots: 2,
     utilitySlots: 4,
     cargoCapacity: 400,
     fuelCapacity: 420,
@@ -650,7 +650,7 @@ export const BASE_AND_SPECIES_HULLS: HullDef[] = [
     armor: 12,
     weaponSlots: 1,
     defenseSlots: 1,
-    extractionSlots: 3,
+    extractionSlots: 2,
     utilitySlots: 2,
     cargoCapacity: 145,
     fuelCapacity: 150,
@@ -770,7 +770,7 @@ export const BASE_AND_SPECIES_HULLS: HullDef[] = [
     armor: 14,
     weaponSlots: 1,
     defenseSlots: 1,
-    extractionSlots: 3,
+    extractionSlots: 2,
     utilitySlots: 2,
     cargoCapacity: 135,
     fuelCapacity: 145,
@@ -997,7 +997,7 @@ const FACTION_HULLS: HullDef[] = FACTIONS.map((fac, idx) => {
     armor,
     weaponSlots: 1,
     defenseSlots: 2,
-    extractionSlots: isMerchant ? 3 : 2,
+    extractionSlots: 2,
     utilitySlots: isMerchant || !isMilitary ? 3 : 2,
     cargoCapacity,
     fuelCapacity,
@@ -1037,6 +1037,9 @@ export const HULLS: HullDef[] = [
 
 for (const hull of HULLS) {
   hull.maxHull = Math.round(hull.maxHull * 3);
+  const r = hull.rarity;
+  const slotLimit = r === 'lendário' || r === 'épico' || r === 'raro' ? 6 : r === 'incomum' ? 2 : 1;
+  hull.extractionSlots = Math.min(6, Math.max(1, slotLimit));
 }
 
 export const HULLS_BY_ID: Record<string, HullDef> = Object.fromEntries(HULLS.map((h) => [h.id, h]));
@@ -1056,16 +1059,16 @@ export const JUMP_DRIVES_BY_ID: Record<string, JumpDriveDef> = Object.fromEntrie
 // Extractors matching exact pulse rates in Section 18.3:
 // 1.0 (broca mineral), 1.5-1.6 (atmosférico/líquido/biológico), 2.2 (bio-mineral/arqueológico), 2.8 (antimatéria/energia)
 export const EXTRACTORS: ExtractorDef[] = [
-  { id: 'broca_mineral_basica', name: 'Broca Mineral Civil', extractionClass: 'broca_mineral', ratePerSec: 0.5, techTier: 1, price: 240, rarity: 'comum', factionStyle: 'silicoide', description: 'A ferramenta mais simples da frota. Tira 1 unidade a cada 2 segundos de minério sólido.' },
-  { id: 'broca_pesada_silicoide', name: 'Perfuratriz Bio-Mineral Pesada', extractionClass: 'broca_mineral', ratePerSec: 2.4, techTier: 3, price: 1850, rarity: 'raro', factionStyle: 'silicoide', description: 'Broca de alta potência. Tira 1 unidade a cada 0,4 segundos em veios profundos e cometas.' },
-  { id: 'coletor_atmosferico_mk1', name: 'Coletor Atmosférico de Turbina', extractionClass: 'coletor_atmosferico', ratePerSec: 1.1, techTier: 2, price: 680, rarity: 'incomum', factionStyle: 'gasosa', description: 'Capta gases leves. Tira 1 unidade a cada 0,9 segundos e abre bolsas nebulares.' },
-  { id: 'coletor_atmosferico_mk2', name: 'Aspirador Gasoso de Alta Pressão', extractionClass: 'coletor_atmosferico', ratePerSec: 2.0, techTier: 3, price: 1600, rarity: 'raro', factionStyle: 'gasosa', description: 'Aspirador de gigantes gasosos. Tira 1 unidade a cada 0,5 segundos.' },
-  { id: 'bomba_liquida_mk1', name: 'Bomba Líquida Orbital', extractionClass: 'bomba_liquida', ratePerSec: 1.1, techTier: 2, price: 640, rarity: 'incomum', factionStyle: 'criogenica', description: 'Sifona água, gelo e sais. Tira 1 unidade a cada 0,9 segundos.' },
-  { id: 'bomba_criogenica_mk2', name: 'Sifão Criogênico Subglacial', extractionClass: 'bomba_liquida', ratePerSec: 2.0, techTier: 3, price: 1550, rarity: 'raro', factionStyle: 'criogenica', description: 'Extrai líquidos profundos. Tira 1 unidade a cada 0,5 segundos.' },
-  { id: 'coletor_biologico_mk1', name: 'Coletor Biológico de Esporos', extractionClass: 'coletor_biologico', ratePerSec: 1.0, techTier: 2, price: 720, rarity: 'incomum', factionStyle: 'pesquisadores', description: 'Recolhe biomassa e esporos. Tira 1 unidade a cada 1 segundo.' },
-  { id: 'coletor_biologico_mk2', name: 'Extrator Simbiótico Avançado', extractionClass: 'coletor_biologico', ratePerSec: 2.2, techTier: 3, price: 1700, rarity: 'raro', factionStyle: 'pesquisadores', description: 'Módulo biológico de precisão. Tira 1 unidade a cada 0,45 segundos.' },
-  { id: 'extrator_energia_mk1', name: 'Extrator de Energia & Antimatéria', extractionClass: 'extrator_energia', ratePerSec: 3.33, techTier: 4, price: 4200, rarity: 'épico', factionStyle: 'radioativa', description: 'O extrator mais rápido da frota. Tira 1 unidade a cada 0,3 segundos.' },
-  { id: 'escavador_arqueologico_mk1', name: 'Escavador Arqueológico de Precisão', extractionClass: 'escavador_arqueologico', ratePerSec: 2.6, techTier: 3, price: 2900, rarity: 'raro', factionStyle: 'pesquisadores', description: 'Recupera relíquias intactas. Tira 1 unidade a cada 0,4 segundos.' },
+  { id: 'broca_mineral_basica', name: 'Broca Mineral Portátil', extractionClass: 'broca_mineral', extractorScope: 'manual', ratePerSec: 0.5, techTier: 1, price: 240, rarity: 'comum', factionStyle: 'silicoide', description: 'Ferramenta manual equipada pela tripulação. Tira 1 unidade a cada 2 segundos de minério sólido.' },
+  { id: 'broca_pesada_silicoide', name: 'Perfuratriz Bio-Mineral Pesada', extractionClass: 'broca_mineral', extractorScope: 'nave', ratePerSec: 2.4, techTier: 3, price: 1850, rarity: 'raro', factionStyle: 'silicoide', description: 'Módulo pesado instalado na nave (máx. 2/nave). Tira 1 unidade a cada 0,4 segundos em veios profundos e cometas.' },
+  { id: 'coletor_atmosferico_mk1', name: 'Coletor Atmosférico de Turbina', extractionClass: 'coletor_atmosferico', extractorScope: 'nave', ratePerSec: 1.1, techTier: 2, price: 680, rarity: 'incomum', factionStyle: 'gasosa', description: 'Módulo de nave que capta gases leves. Tira 1 unidade a cada 0,9 segundos e abre bolsas nebulares.' },
+  { id: 'coletor_atmosferico_mk2', name: 'Aspirador Gasoso de Alta Pressão', extractionClass: 'coletor_atmosferico', extractorScope: 'nave', ratePerSec: 2.0, techTier: 3, price: 1600, rarity: 'raro', factionStyle: 'gasosa', description: 'Aspirador orbital de gigantes gasosos instalado na nave. Tira 1 unidade a cada 0,5 segundos.' },
+  { id: 'bomba_liquida_mk1', name: 'Bomba Líquida Orbital', extractionClass: 'bomba_liquida', extractorScope: 'nave', ratePerSec: 1.1, techTier: 2, price: 640, rarity: 'incomum', factionStyle: 'criogenica', description: 'Módulo de nave que sifona água, gelo e sais. Tira 1 unidade a cada 0,9 segundos.' },
+  { id: 'bomba_criogenica_mk2', name: 'Sifão Criogênico Subglacial', extractionClass: 'bomba_liquida', extractorScope: 'nave', ratePerSec: 2.0, techTier: 3, price: 1550, rarity: 'raro', factionStyle: 'criogenica', description: 'Módulo de nave para líquidos profundos. Tira 1 unidade a cada 0,5 segundos.' },
+  { id: 'coletor_biologico_mk1', name: 'Coletor Biológico de Esporos', extractionClass: 'coletor_biologico', extractorScope: 'manual', ratePerSec: 1.0, techTier: 2, price: 720, rarity: 'incomum', factionStyle: 'pesquisadores', description: 'Ferramenta manual de expedição. Recolhe biomassa e esporos em solo (1 un./s).' },
+  { id: 'coletor_biologico_mk2', name: 'Extrator Simbiótico Avançado', extractionClass: 'coletor_biologico', extractorScope: 'manual', ratePerSec: 2.2, techTier: 3, price: 1700, rarity: 'raro', factionStyle: 'pesquisadores', description: 'Ferramenta manual biológica de precisão para a tripulação. Tira 1 unidade a cada 0,45 segundos.' },
+  { id: 'extrator_energia_mk1', name: 'Extrator de Energia & Antimatéria', extractionClass: 'extrator_energia', extractorScope: 'nave', ratePerSec: 3.33, techTier: 4, price: 4200, rarity: 'épico', factionStyle: 'radioativa', description: 'O extrator de nave mais rápido da frota. Tira 1 unidade a cada 0,3 segundos em solo e singularidades.' },
+  { id: 'escavador_arqueologico_mk1', name: 'Escavador Arqueológico de Precisão', extractionClass: 'escavador_arqueologico', extractorScope: 'manual', ratePerSec: 2.6, techTier: 3, price: 2900, rarity: 'raro', factionStyle: 'pesquisadores', description: 'Ferramenta manual arqueológica da tripulação. Recupera relíquias intactas a cada 0,4 segundos.' },
 ];
 
 export const EXTRACTORS_BY_ID: Record<string, ExtractorDef> = Object.fromEntries(
@@ -1095,8 +1098,11 @@ export const SUIT_GEAR: SuitGearDef[] = [
   { id: 'prot_radiacao', name: 'Blindagem Anti-Radiação', category: 'protecao', hazardType: 'radiacao', explorationBonus: 16, combatPower: 14, price: 1150, rarity: 'raro', factionStyle: 'radioativa', description: 'Bloqueia partículas ionizantes letais.' },
   { id: 'prot_toxicidade', name: 'Respirador & Filtro Antitóxico', category: 'protecao', hazardType: 'toxicidade', explorationBonus: 14, combatPower: 8, price: 740, rarity: 'incomum', factionStyle: 'gasosa', description: 'Filtra gases corrosivos e esporos tóxicos.' },
   { id: 'prot_pressao', name: 'Exoesqueleto de Alta Pressão', category: 'protecao', hazardType: 'pressao', explorationBonus: 16, combatPower: 16, price: 1350, rarity: 'raro', factionStyle: 'silicoide', description: 'Suporta gravidade esmagadora e mares profundos.' },
+  { id: 'tanque_suporte_vital', name: 'Tanque Pressurizado de Oxigênio', category: 'tanque', explorationBonus: 15, combatPower: 6, price: 690, rarity: 'incomum', factionStyle: 'criogenica', description: 'Reserva portátil de atmosfera e suporte vital para longas travessias em solo.' },
+  { id: 'veiculo_batedor', name: 'Buggy Batedor Todo-Terreno', category: 'veiculo', explorationBonus: 20, combatPower: 16, price: 1650, rarity: 'incomum', factionStyle: 'mercantil', description: 'Carro de exploração leve para cobrir grandes distâncias em superfícies acidentadas.' },
   { id: 'drone_superficie', name: 'Drone Autônomo de Reconhecimento', category: 'drone', explorationBonus: 22, combatPower: 22, price: 2400, rarity: 'épico', factionStyle: 'pesquisadores', description: 'Mapeia ameaças antes do desembarque.' },
-  { id: 'rover_exploracao', name: 'Veículo Rover Blindado', category: 'drone', explorationBonus: 30, combatPower: 34, price: 4800, rarity: 'épico', factionStyle: 'militar', description: 'Transporte blindado para expedições hostis.' },
+  { id: 'rover_exploracao', name: 'Veículo Rover Blindado', category: 'veiculo', explorationBonus: 30, combatPower: 34, price: 4800, rarity: 'épico', factionStyle: 'militar', description: 'Carro de exploração pesado e blindado para expedições hostis.' },
+  { id: 'tanque_exploracao', name: 'Tanque Blindado de Expedição', category: 'tanque', explorationBonus: 26, combatPower: 42, price: 5200, rarity: 'épico', factionStyle: 'militar', description: 'Tanque de assalto terrestre com cabine pressurizada para enfrentar predadores e terrenos extremos.' },
 ];
 
 export const SUIT_GEAR_BY_ID: Record<string, SuitGearDef> = Object.fromEntries(

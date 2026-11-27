@@ -3,14 +3,19 @@ import { Rocket, Play, RotateCcw, Shield, Compass, Sparkles } from 'lucide-react
 import { FACTIONS, LIFE_FORMS, SPECIES } from '../data/lifeforms';
 import { CreatureCard } from './CreatureCard';
 import { getSystemSummaryById } from '../data/universe';
-import type { LifeFormId, PlayerCampaignState } from '../types/game';
+import type { CharacterGender, LifeFormId, PlayerCampaignState } from '../types/game';
 import { TECH_CATEGORY_META } from '../utils/formatting';
 import { TechCategoryBadge } from './TechCategoryBadge';
 
 interface StartScreenProps {
   existingSave: PlayerCampaignState | null;
   onContinueSave: () => void;
-  onStartNewGame: (speciesId: string, factionId: string, playerName: string) => void;
+  onStartNewGame: (
+    speciesId: string,
+    factionId: string,
+    playerName: string,
+    playerGender: CharacterGender
+  ) => void;
 }
 
 export const StartScreen: React.FC<StartScreenProps> = ({
@@ -19,6 +24,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
   onStartNewGame,
 }) => {
   const [playerName, setPlayerName] = useState('Comandante Lyra');
+  const [selectedGender, setSelectedGender] = useState<CharacterGender>('M');
   const [selectedLifeForm, setSelectedLifeForm] = useState<LifeFormId>('humanoide');
   const [selectedSpeciesId, setSelectedSpeciesId] = useState<string>('solarianos');
   const [selectedFactionId, setSelectedFactionId] = useState<string>('fac_solarianos_1');
@@ -89,8 +95,44 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                 maxLength={32}
                 value={playerName}
                 onChange={(e) => setPlayerName(e.target.value)}
-                className="w-52 sm:w-64 bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm font-medium text-white focus:outline-none focus:border-cyan-400"
+                className="w-44 sm:w-56 bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm font-medium text-white focus:outline-none focus:border-cyan-400"
               />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-300 whitespace-nowrap shrink-0">
+                Sexo
+              </span>
+              <div
+                role="group"
+                aria-label="Sexo do personagem"
+                className="inline-flex rounded-lg border border-slate-700 bg-slate-950 p-0.5 shrink-0"
+              >
+                <button
+                  type="button"
+                  aria-pressed={selectedGender === 'M'}
+                  onClick={() => setSelectedGender('M')}
+                  className={`px-3 py-1 rounded-md text-xs sm:text-sm font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    selectedGender === 'M'
+                      ? 'bg-cyan-500 text-slate-950'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Masculino
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={selectedGender === 'F'}
+                  onClick={() => setSelectedGender('F')}
+                  className={`px-3 py-1 rounded-md text-xs sm:text-sm font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    selectedGender === 'F'
+                      ? 'bg-cyan-500 text-slate-950'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Feminino
+                </button>
+              </div>
             </div>
 
             {existingSave && (
@@ -177,6 +219,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                             kind="species"
                             name={sp.name}
                             lifeFormId={sp.lifeFormId}
+                            gender={selectedGender}
                             description={sp.description}
                             sizeClass="w-16 h-16 xl:w-20 xl:h-20"
                             allowAiGeneration={false}
@@ -260,6 +303,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                   kind="species"
                   name={selectedSpecies.name}
                   lifeFormId={selectedSpecies.lifeFormId}
+                  gender={selectedGender}
                   description={selectedSpecies.description}
                   sizeClass="w-28 h-28 xl:w-32 xl:h-32 shrink-0"
                   allowAiGeneration={true}
@@ -267,7 +311,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="text-xs text-cyan-400 font-semibold">Dossiê da Origem</div>
                   <div className="text-sm text-slate-300 truncate">
-                    {playerName.trim() || 'Comandante Lyra'}
+                    {playerName.trim() || 'Comandante Lyra'} · {selectedGender === 'F' ? 'Feminino' : 'Masculino'}
                   </div>
                   <h3 className="font-display text-2xl font-bold text-white leading-tight truncate">
                     {selectedSpecies.name}
@@ -339,7 +383,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
 
               <button
                 type="button"
-                onClick={() => onStartNewGame(selectedSpecies.id, selectedFaction.id, playerName)}
+                onClick={() => onStartNewGame(selectedSpecies.id, selectedFaction.id, playerName, selectedGender)}
                 className="w-full py-3.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-display font-bold text-base flex items-center justify-center gap-2 cursor-pointer transition-colors"
               >
                 <Rocket className="w-5 h-5 shrink-0" />
