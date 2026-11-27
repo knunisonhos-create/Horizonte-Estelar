@@ -982,7 +982,7 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
       label: 'Comercializar e Estaleiro',
       icon: <ShoppingCart className="w-3.5 h-3.5" />,
       accent: 'border-indigo-500/45 text-indigo-200 bg-indigo-500/15',
-      visible: isScanned && actualLevel >= 3,
+      visible: isScanned && actualLevel >= 1,
     },
     {
       id: 'conversar',
@@ -2151,7 +2151,7 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                 : `Executar Bombardeio Orbital em ${planet.name}`}
             </button>
           </div>
-        ) : effectiveTab === 'comercio_estaleiro' && actualLevel >= 3 ? (
+        ) : effectiveTab === 'comercio_estaleiro' && actualLevel >= 1 ? (
           <div className="space-y-3">
             {/* Switcher Mercado / Estaleiro */}
             <div className="grid grid-cols-2 gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
