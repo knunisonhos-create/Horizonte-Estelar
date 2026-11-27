@@ -23,6 +23,7 @@ import {
   getCrewItemMaintenancePerCycle,
   isCrewEquipableItem,
   isManualExtractor,
+  getMaxShipExtractors,
 } from './combat';
 
 export const FACTION_VAULT_FEE_PER_ITEM = 5;
@@ -219,7 +220,7 @@ export function installGearOnShip(
         error: 'Ferramenta de extração manual: equipe diretamente na Tripulação.',
       };
     }
-    const maxShipExtractors = Math.min(2, hull.extractionSlots);
+    const maxShipExtractors = getMaxShipExtractors(hull);
     if (maxShipExtractors <= 0) {
       return { ok: false, ship, displaced: [], error: 'Esta nave não tem encaixe de extrator.' };
     }

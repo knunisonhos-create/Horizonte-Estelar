@@ -136,6 +136,7 @@ import {
   evaluatePlanetConditionRisk,
   getSystemExtractionLicenseStatus,
   HEADQUARTERS_COST,
+  THREAT_TO_HAZARD,
 } from '../engine/planetaryActions';
 import {
   EXTRACTION_CLASS_LABELS,
@@ -1928,6 +1929,50 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                   </span>
                 </div>
 
+                {(() => {
+                  const suitGearList = getCrewSuitIds(campaign).map((id) => SUIT_GEAR_BY_ID[id]).filter(Boolean);
+                  return (
+                    <div className="bg-slate-900/90 border border-amber-500/45 rounded-xl p-3 space-y-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                        <ShieldAlert className="w-4 h-4 text-amber-400" />
+                        Riscos Ambientais & Proteção de Trajes
+                      </div>
+                      {planet.habitability.threats.length === 0 ? (
+                        <div className="text-[11px] text-emerald-300">Nenhum perigo ambiental extremo detectado.</div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                          {planet.habitability.threats.map((th) => {
+                            const hz = THREAT_TO_HAZARD[th];
+                            const protectedSuit = suitGearList.some((g) => g.hazardType === hz);
+                            return (
+                              <div
+                                key={th}
+                                className={`p-2 rounded-lg border text-[11px] flex items-center justify-between gap-2 ${
+                                  protectedSuit
+                                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                                    : 'bg-rose-950/30 border-rose-500/50 text-rose-200'
+                                }`}
+                              >
+                                <span className="font-medium flex items-center gap-1">
+                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                  {th}
+                                </span>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                    protectedSuit ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                                  }`}
+                                >
+                                  {protectedSuit ? 'Traje Protege ✓' : 'Desprotegido ⚠️'}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {actualLevel >= 3 && system.controllingFactionId && (
                   <div
                     className={`rounded-lg px-3 py-2 border text-[11px] flex items-center justify-between gap-2 ${
@@ -2042,6 +2087,50 @@ export const PlanetPanel: React.FC<PlanetPanelProps> = ({
                     {groundBadge.label}
                   </span>
                 </div>
+
+                {(() => {
+                  const suitGearList = getCrewSuitIds(campaign).map((id) => SUIT_GEAR_BY_ID[id]).filter(Boolean);
+                  return (
+                    <div className="bg-slate-900/90 border border-amber-500/45 rounded-xl p-3 space-y-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                        <ShieldAlert className="w-4 h-4 text-amber-400" />
+                        Riscos Ambientais & Proteção de Trajes
+                      </div>
+                      {planet.habitability.threats.length === 0 ? (
+                        <div className="text-[11px] text-emerald-300">Nenhum perigo ambiental extremo detectado.</div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                          {planet.habitability.threats.map((th) => {
+                            const hz = THREAT_TO_HAZARD[th];
+                            const protectedSuit = suitGearList.some((g) => g.hazardType === hz);
+                            return (
+                              <div
+                                key={th}
+                                className={`p-2 rounded-lg border text-[11px] flex items-center justify-between gap-2 ${
+                                  protectedSuit
+                                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                                    : 'bg-rose-950/30 border-rose-500/50 text-rose-200'
+                                }`}
+                              >
+                                <span className="font-medium flex items-center gap-1">
+                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                  {th}
+                                </span>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                    protectedSuit ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                                  }`}
+                                >
+                                  {protectedSuit ? 'Traje Protege ✓' : 'Desprotegido ⚠️'}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {actualLevel >= 3 && system.controllingFactionId && (
                   <div

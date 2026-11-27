@@ -49,6 +49,7 @@ import {
   isCrewEquipableItem,
   isManualExtractor,
   TECH_SYNERGY_BONUS,
+  getMaxShipExtractors,
 } from '../engine/combat';
 import {
   CHARACTER_ATTRIBUTE_LIST,
@@ -228,7 +229,7 @@ export const ShipAndCrewPanel: React.FC<ShipAndCrewPanelProps> = ({
   const suitCombatPower = suitEffectiveStats.combatPower;
   const suitHazardProtections = new Set(suitGearEquipped.map((g) => g.hazardType).filter(Boolean)).size;
   const depotCrewEquipable = ship.depot.filter((item) => isCrewEquipableItem(item.category, item.itemId));
-  const maxShipExtractors = Math.min(2, hull.extractionSlots);
+  const maxShipExtractors = getMaxShipExtractors(hull);
 
   const utilitiesEquipped = ship.utilityIds.map((id) => UTILITY_BY_ID[id]).filter(Boolean);
   const utilityCargoBonus = utilitiesEquipped

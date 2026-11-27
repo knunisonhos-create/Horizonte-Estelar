@@ -1621,6 +1621,14 @@ export default function App() {
         const supplyDrain = inOrbit ? 0 : computeCrewSupplyDrainPerSec(prev.crew, bon.supplyCostMult) * dt;
         const nextSupplies = Math.max(0, prev.supplies - supplyDrain);
 
+        const connectedExtractorsCount = ship?.extractorIds?.length ?? 0;
+        const miningFuelBurn = mine && (mine.warmup ?? 0) <= 0 ? (0.015 + connectedExtractorsCount * 0.04) * dt : 0;
+        const nextFuel = Math.max(0, prev.fuel - miningFuelBurn);
+        if (miningFuelBurn > 0 && nextFuel <= 0) {
+          setMining(null);
+          notify('Combustível esgotado devido aos extratores conectados! A extração foi interrompida.');
+        }
+
         const maxCrewHealth = 100 + Math.max(0, prev.healthPotency ?? 0);
         const master = prev.crew.find((member) => member.status === 'ativo' && member.role === 'mestre_tripulacao');
         const masterRaw = master
@@ -1736,6 +1744,7 @@ export default function App() {
           gameTimeSeconds: prev.gameTimeSeconds + dt,
           cycleElapsedSec: prev.cycleElapsedSec + dt,
           supplies: nextSupplies + cosmicSeedGain,
+          fuel: nextFuel,
           crewHealth: nextCrewHealth,
           cargo: nextCargo,
           ships: nextShips,

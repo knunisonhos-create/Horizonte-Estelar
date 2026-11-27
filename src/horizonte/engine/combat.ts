@@ -704,3 +704,11 @@ export function computeFleeSuccessChance(
     threatPenalty,
   };
 }
+
+export function getMaxShipExtractors(hull: { rarity?: string; extractionSlots?: number }): number {
+  const r = hull?.rarity ?? 'comum';
+  if (r === 'comum') return 1;
+  if (r === 'incomum') return 2;
+  return Math.max(6, hull?.extractionSlots ?? 6);
+}
+

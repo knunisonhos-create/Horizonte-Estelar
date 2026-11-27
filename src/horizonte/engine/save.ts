@@ -9,7 +9,7 @@ import {
 } from './galacticWar';
 import { DEFAULT_ORIGIN_BONUSES } from '../data/originPerks';
 import { createDefaultCharacterProgress, normalizeCharacterProgress } from './character';
-import { isCrewEquipableItem, isManualExtractor, isShipExtractor } from './combat';
+import { isCrewEquipableItem, isManualExtractor, isShipExtractor, getMaxShipExtractors } from './combat';
 import { normalizeFactionVault } from './factionVault';
 import { emptyFactionCommand, normalizeFactionCommand } from './factionRanks';
 
@@ -260,7 +260,7 @@ export function validateAndMigrateSave(raw: unknown): PlayerCampaignState | null
 
     // Separate manual extractors (move to crewEquipment) vs ship extractors (cap to min(2, extractionSlots))
     const rawExtractors = Array.isArray(s.extractorIds) ? s.extractorIds : [];
-    const maxShipExtractors = Math.min(2, Math.max(0, hullDef?.extractionSlots ?? 2));
+    const maxShipExtractors = hullDef ? getMaxShipExtractors(hullDef) : 1;
     const keptShipExtractors: string[] = [];
     rawExtractors.forEach((exId, idx) => {
       if (typeof exId !== 'string') return;
